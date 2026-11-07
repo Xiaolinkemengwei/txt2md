@@ -5,7 +5,12 @@
 
 ## [Unreleased]
 
-（暂无）
+### 计划中（2.0）
+
+- 多格式互转：txt / md / html / docx / xlsx / csv / pdf 共 42 条有向边，支持双向转换
+- 设计见 [docs/2.0-设计与实现大纲.md](docs/2.0-设计与实现大纲.md)，
+  选型证据见 [research/2026-11-07-2.0-多格式互转调研.md](research/2026-11-07-2.0-多格式互转调研.md)
+- 引擎策略：pandoc / LibreOffice / Word 均外置可选，Edge 承担文本类 → PDF
 
 ## [1.0.0] - 2026-11-07
 
