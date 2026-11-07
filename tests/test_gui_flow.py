@@ -13,6 +13,8 @@ import tempfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 测试不读写用户的真实配置，否则上一次跑留下的输出格式会让断言随机失败
+os.environ["AIEYE_NO_SETTINGS"] = "1"
 os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -26,7 +28,7 @@ QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
 
 from gui import theme as T  # noqa: E402
 from gui.app import MainWindow  # noqa: E402
-from gui.widgets import FormatChips  # noqa: E402
+from gui.widgets import FormatGrid  # noqa: E402
 
 PASS = FAIL = 0
 FAILURES: list[str] = []
@@ -74,21 +76,121 @@ def test_scan(app: QApplication, win: MainWindow, src: Path):
 
 def test_chips(win: MainWindow):
     print("\n2. 格式选择")
-    chips: FormatChips = win.chips
-    check("7 个格式按钮", len(chips._buttons) == 7, str(len(chips._buttons)))
+    chips: FormatGrid = win.chips
+    check("7 个格式卡片", len(chips._cards) == 7, str(len(chips._cards)))
     check("默认选中 md", chips.current_format() == "md", chips.current_format())
 
     chips.set_format("pdf")
     check("可切换目标格式", chips.current_format() == "pdf")
 
-    # 目标格式变更要同步到说明文字
-    chips.changed.emit("pdf")
-    win._on_format_changed("pdf")
+    # set_format 必须自己发出 changed（调用方不该再手动刷新说明）
     hint = win.fmt_hint.text()
-    check("格式说明随之更新", "PDF" in hint, hint)
+    check("格式说明随之更新", "保真" in hint and hint.strip(), hint)
 
     chips.set_format("md")
-    win._on_format_changed("md")
+
+
+def test_typed_path(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n6. 输入框路径与拖放")
+    only = tmp / "typed"
+    only.mkdir(exist_ok=True)
+    (only / "t.txt").write_bytes("输入框路径\n".encode("gbk"))
+
+    # 只粘贴路径、不按回车，直接点转换也要能跑
+    win.paths = []
+    win.path_edit.setText(str(only / "t.txt"))
+    win.chips.set_format("md")
+    win._start_convert()
+    if win.worker is not None:
+        win.worker.wait(30000)
+    for _ in range(20):
+        app.processEvents()
+    check("粘贴路径后直接转换可用", (only / "t.md").exists(),
+          win.summary.text())
+
+    # 初始空态不该露出表头
+    win._clear_log()
+    app.processEvents()
+    check("空态隐藏日志表头", not win.log_header.isVisible())
+
+
+def test_layout_heights(win: MainWindow):
+    print("\n7. 布局不压缩")
+    win.resize(win.minimumWidth(), win.minimumHeight())
+    QApplication.processEvents()
+    card = win.chips._cards["md"]
+    check("最小尺寸下格式卡片未被压扁", card.height() >= 56, str(card.height()))
+    check("格式网格未被压扁", win.chips.height() >= 56, str(win.chips.height()))
+
+    # 窗口下限若小于布局需求，Qt 不会报错，而是静默把最后一张卡片裁掉
+    # （表现为「覆盖同名文件」整行消失）。这两条断言就是防这个的。
+    lay = win.centralWidget().layout()
+    check("窗口最小高度不小于布局需求",
+          win.minimumHeight() >= lay.minimumSize().height(),
+          f"窗口 {win.minimumHeight()} < 布局 {lay.minimumSize().height()}")
+    check("选项卡片未被裁切",
+          win.options_card.height() >= win.options_card.minimumHeight(),
+          f"{win.options_card.height()} < {win.options_card.minimumHeight()}")
+
+
+def test_all_skipped_retry(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n8. 全部跳过时的补救入口")
+    d = tmp / "skip"
+    d.mkdir(exist_ok=True)
+    (d / "s.txt").write_text("标题\n\n正文\n", encoding="utf-8")
+
+    win.chips.set_format("md")
+    win.sw_overwrite.setChecked(True)
+    win._set_paths([d])
+    run_convert(app, win)
+    check("首次转换成功", "成功 1" in win.summary.text(), win.summary.text())
+
+    # 目标已存在 + 未开覆盖 → 全部跳过，必须给出一键补救的入口
+    # 这里只选 .txt：选目录会把上一轮生成的 .md 也扫进来，那不是「全部跳过」的场景
+    win.sw_overwrite.setChecked(False)
+    win._set_paths([d / "s.txt"])
+    run_convert(app, win)
+    check("第二次全部跳过", "跳过 1" in win.summary.text(), win.summary.text())
+    check("出现「覆盖并重转」入口", win.btn_retry.isVisible())
+
+    win.btn_retry.click()
+    if win.worker is not None:
+        win.worker.wait(30000)
+    for _ in range(20):
+        app.processEvents()
+    check("点补救入口后转换成功", "成功 1" in win.summary.text(), win.summary.text())
+    check("成功后补救入口收起", not win.btn_retry.isVisible())
+
+
+def test_worker_crash(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n9. 转换线程异常不锁死界面")
+    import gui.app as appmod
+
+    d = tmp / "crash"
+    d.mkdir(exist_ok=True)
+    (d / "c.txt").write_text("标题\n\n正文\n", encoding="utf-8")
+
+    def boom(job, **kwargs):
+        raise RuntimeError("模拟转换内核崩溃")
+
+    orig = appmod.convert_one
+    appmod.convert_one = boom
+    try:
+        win.chips.set_format("md")
+        win.sw_overwrite.setChecked(True)
+        win._set_paths([d])
+        win._start_convert()
+        if win.worker is not None:
+            win.worker.wait(30000)
+        for _ in range(20):
+            app.processEvents()
+    finally:
+        appmod.convert_one = orig
+
+    # 修复前：线程直接死掉，finished_all 永不发出，按钮永久灰着
+    check("异常后按钮恢复可用", win.btn_convert.isEnabled())
+    check("异常后仍给出汇总", "失败 1" in win.summary.text(), win.summary.text())
+    check("异常后退出忙碌态", win.btn_convert.text() == "一键转换", win.btn_convert.text())
 
 
 def test_suggest(win: MainWindow, tmp: Path):
@@ -143,16 +245,90 @@ def test_convert(app: QApplication, win: MainWindow, src: Path, tmp: Path):
           win.summary.text())
 
 
+def test_viewer(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n8. 查看结果与复制")
+    from gui.viewer import ResultViewer
+
+    # 模拟一条已完成记录：带预览文本
+    preview = ("# 项目验收报告\n\n"
+               "识别结果需要能复制，也要能导出。\n\n"
+               "- 第一项\n- 第二项\n\n"
+               "![原图 截图.png](截图_assets/截图_orig.png)\n")
+    win._on_item("ok", str(tmp / "截图.png"), str(tmp / "截图.md"), "",
+                 preview=preview)
+    check("预览已缓存", bool(win._previews.get(str(tmp / "截图.md"))),
+          str(list(win._previews)))
+
+    viewer = ResultViewer(str(tmp / "截图.png"), str(tmp / "截图.md"), preview)
+    check("查看器标题含文件名", "截图.md" in viewer.windowTitle(),
+          viewer.windowTitle())
+    check("默认显示 Markdown 原文", viewer.text.toPlainText().startswith("# 项目验收报告"),
+          viewer.text.toPlainText()[:20])
+
+    viewer._copy_all()
+    clip = QApplication.clipboard().text()
+    check("复制全部写进剪贴板", "项目验收报告" in clip, clip[:30])
+
+    # 纯文本视图：去掉标记，且不把图片 alt 当成正文行
+    viewer._apply_mode("plain")
+    plain = viewer.text.toPlainText()
+    check("纯文本去掉 # 标记", "# 项目验收报告" not in plain, plain[:40])
+    check("纯文本不留图片 alt", "原图" not in plain, plain[:80])
+
+    # 选中复制：只复制选区
+    cursor = viewer.text.textCursor()
+    cursor.setPosition(0)
+    from PySide6.QtGui import QTextCursor
+    cursor.setPosition(5, QTextCursor.MoveMode.KeepAnchor)
+    viewer.text.setTextCursor(cursor)
+    viewer._copy_selection()
+    check("复制选中只含选区", len(QApplication.clipboard().text()) <= 6,
+          QApplication.clipboard().text())
+
+    # 另存为：复用内核写出，md → docx 应产出真文件
+    out = tmp / "from_viewer.docx"
+    viewer.export_to(str(out), "docx")
+    check("另存为 docx 成功", out.exists() and out.stat().st_size > 1000,
+          f"{out.exists()}")
+
+    check("图片不进输出格式卡片", "image" not in win.chips._cards,
+          str(list(win.chips._cards)))
+    viewer.close()
+
+
+def test_image_source(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n9. 图片作为输入")
+    from core.registry import FORMATS
+
+    pic = tmp / "shot.png"
+    from PIL import Image
+    Image.new("RGB", (400, 200), "white").save(pic)
+
+    # 关着 OCR 也必须被强制打开：图片没有文字层
+    win.sw_ocr.setChecked(False)
+    win._set_paths([pic])
+    app.processEvents()
+    check("图片被识别为可转换文件",
+          any(f.name == "shot.png" for f in win.found_files),
+          str([f.name for f in win.found_files]))
+
+    forced = any(f.suffix.lower() in FORMATS["image"].extensions
+                 for f in win.found_files)
+    check("图片输入触发强制 OCR 判定", forced)
+    win.sw_ocr.setChecked(True)
+    check("OCR 开关处于可用状态", win.sw_ocr.isChecked() and win.sw_ocr.isEnabled())
+
+
 def main() -> int:
     print("=" * 62)
-    print("txt2md 2.0 界面层测试")
+    print("AI eye 界面层测试")
     print("=" * 62)
 
     app = QApplication(sys.argv)
     T.init_fonts()
     app.setStyleSheet(T.qss())
 
-    tmp = Path(tempfile.mkdtemp(prefix="txt2md-gui-"))
+    tmp = Path(tempfile.mkdtemp(prefix="aieye-gui-"))
     win = MainWindow()
     win.show()
     app.processEvents()
@@ -163,6 +339,12 @@ def main() -> int:
         test_chips(win)
         test_suggest(win, tmp)
         test_convert(app, win, src, tmp)
+        test_typed_path(app, win, tmp)
+        test_all_skipped_retry(app, win, tmp)
+        test_worker_crash(app, win, tmp)
+        test_layout_heights(win)
+        test_viewer(app, win, tmp)
+        test_image_source(app, win, tmp)
     finally:
         win.close()
         shutil.rmtree(tmp, ignore_errors=True)

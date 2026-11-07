@@ -1,4 +1,4 @@
-"""txt2md 2.0 转换内核测试。
+"""AI eye 转换内核测试。
 
 覆盖四类断言，不只看「有没有产出文件」：
   1. 保真   —— 往返后内容/结构是否还等价（字节级或元素级）
@@ -14,6 +14,7 @@ from __future__ import annotations
 import shutil
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -281,6 +282,28 @@ def test_fidelity(tmp: Path):
         check("pdf 识别出列表与嵌套", "- 甲" in lp and "甲一" in lp,
               lp.replace("\n", "\\n"))
 
+    # -- 真实网页结构：带 meta / link / style / script
+    # 这类 head 里的自闭合标签会让「跳过深度」只增不减，导致整个 body 被丢掉。
+    # 之前的样本手写得过于干净（没有 head），所以漏掉了这个 bug。
+    real_html = tmp / "page.html"
+    real_html.write_text(
+        '<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width">'
+        '<link rel="stylesheet" href="a.css"><title>页面标题</title>'
+        '<style>body{color:#333}</style><script>var a=1;</script></head>'
+        '<body><h1>正文标题</h1><p>第一段。</p><p>第二段<strong>加粗</strong>。</p>'
+        '<ul><li>甲</li><li>乙</li></ul>'
+        '<script>console.log(1)</script></body></html>',
+        encoding="utf-8")
+    ok, err = convert(real_html, "md", tmp / "realhtml")
+    check("带 head 的标准网页可读取", ok, err)
+    if ok:
+        rm = (tmp / "realhtml" / "page.md").read_text("utf-8")
+        check("网页正文未丢失", "正文标题" in rm and "第一段" in rm, rm)
+        check("网页列表可还原", "- 甲" in rm and "- 乙" in rm, rm.replace("\n", "\\n"))
+        check("head 里的 title 不混入正文", "页面标题" not in rm, rm)
+        check("style / script 不混入正文", "color:#333" not in rm and "console.log" not in rm, rm)
+
 
 # ================================================================ 6. 防呆
 def test_safety(tmp: Path):
@@ -363,7 +386,7 @@ def test_cli_output(tmp: Path):
     root = Path(__file__).resolve().parent.parent
     env = dict(os.environ, PYTHONIOENCODING="gbk")
     for arg in ("--formats", "--engines", "--version"):
-        p = subprocess.run([sys.executable, str(root / "txt2md.py"), arg],
+        p = subprocess.run([sys.executable, str(root / "aieye.py"), arg],
                            capture_output=True, env=env, cwd=str(root))
         check(f"{arg} 在 GBK 输出下不崩溃", p.returncode == 0,
               p.stderr.decode("utf-8", "replace")[-300:])
@@ -452,13 +475,288 @@ def test_verify(tmp: Path):
         check("伪 PDF 被拦截", True)
 
 
-# ================================================================ main
+def test_ocr(tmp: Path):
+    """OCR 往返：把文字渲染成图片再存成 PDF（模拟扫描件），识别后应还原内容。
+
+    rapidocr 未安装时整组跳过（计 0 项），不因可选组件缺失而报失败。
+    """
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+    except Exception:
+        print("\n（跳过 OCR 测试：未安装 rapidocr-onnxruntime）")
+        return
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    section("OCR 扫描件识别")
+
+    def _font(sz):
+        for name in ("msyh.ttc", "simhei.ttf", "simsun.ttc"):
+            try:
+                return ImageFont.truetype(name, sz)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    img = Image.new("RGB", (1240, 900), "white")
+    d = ImageDraw.Draw(img)
+    d.text((80, 60), "扫描件识别测试", font=_font(48), fill="black")
+    d.text((80, 180), "本段文字由图片渲染而来，用于验证 OCR 通道。", font=_font(28), fill="black")
+    d.text((80, 240), "数字 680 与英文 words 不应丢失。", font=_font(28), fill="black")
+    scanned = tmp / "scanned.pdf"
+    img.save(scanned, "PDF", resolution=150)
+
+    from core.pipeline import Job, convert_one
+
+    # 不开 OCR：扫描件要快速失败，且提示里要指出可用 OCR
+    r = convert_one(Job(src=scanned, dst=tmp / "noflag.md",
+                        src_format="pdf", dst_format="md", options={}), force=True)
+    check("扫描件默认快速失败", r.status == "error", r.reason)
+    check("失败提示包含 OCR 指引", "--ocr" in r.reason or "OCR" in r.reason, r.reason)
+
+    t0 = time.perf_counter()
+    r = convert_one(Job(src=scanned, dst=tmp / "ocr.md",
+                        src_format="pdf", dst_format="md",
+                        options={"ocr": True}), force=True)
+    check("OCR 转换成功", r.status == "ok", r.reason)
+    if r.status != "ok":
+        return
+    got = (tmp / "ocr.md").read_text("utf-8")
+    check("标题被还原", "扫描件识别测试" in got, got[:80])
+    check("数字不丢失", "680" in got, got[:120])
+    check("英文不丢失", "words" in got, got[:120])
+    check("OCR 页有提示警告", any("OCR" in w for w in r.warnings), str(r.warnings))
+    print(f"      OCR 耗时 {time.perf_counter() - t0:.1f}s（含模型加载）")
+
+
+# ================================================================ 版面切分
+def _synthetic_page(table: bool = False):
+    """构造一页「正文 + 图区 + 正文」，图区用几何图形精确控制。
+
+    不用真扫描页做单测：真页依赖外部文件，而这里要验的是「给定墨迹分布
+    能不能切对」，构造页能精确控制墨量、位置和线条形态。
+    """
+    from PIL import Image, ImageDraw
+
+    w, h = 900, 1200
+    img = Image.new("L", (w, h), 255)
+    d = ImageDraw.Draw(img)
+    lines: list[dict] = []
+
+    def text_block(y0: int, n: int):
+        for i in range(n):
+            y = y0 + i * 26
+            for k in range(18):
+                x = 90 + k * 28
+                d.rectangle([x, y, x + 18, y + 13], fill=0)
+            lines.append({"text": f"正文第{i + 1}行", "size": 16.0, "bold": False,
+                          "x0": 90, "right": 90 + 18 * 28 - 10,
+                          "top": float(y), "bottom": float(y + 13)})
+
+    text_block(80, 5)
+    if table:
+        for r in range(6):
+            y = 420 + r * 40
+            d.line([100, y, 800, y], fill=0, width=3)
+        for c in range(4):
+            x = 100 + c * 175
+            d.line([x, 420, x, 620], fill=0, width=3)
+    else:
+        for k in range(40):
+            x = 120 + k * 17
+            top = 420 + (k * 37) % 120
+            d.rectangle([x, top, x + 9, 620], fill=0)
+
+    text_block(700, 4)
+    # 图注：图区正下方，图区内的刻度、页码
+    lines.append({"text": "图3-1测试图例", "size": 16.0, "bold": False,
+                  "x0": 380, "right": 520, "top": 626.0, "bottom": 642.0})
+    lines.append({"text": "12.80", "size": 14.0, "bold": False,
+                  "x0": 128, "right": 172, "top": 470.0, "bottom": 486.0})
+    lines.append({"text": "31", "size": 14.0, "bold": False,
+                  "x0": 850, "right": 870, "top": 1150.0, "bottom": 1166.0})
+    return img, lines
+
+
+def test_layout(tmp: Path):
+    section("10. 版面切分与插图")
+
+    try:
+        from core import layout
+    except Exception as exc:
+        check("版面模块可导入", False, str(exc))
+        return
+    if not layout.available():
+        print("\n（跳过版面测试：未安装 opencv / numpy）")
+        return
+
+    # --- 图区检测
+    img, lines = _synthetic_page()
+    page = layout.analyze_page(img, lines, page_no=1)
+    check("检出 1 个图区", len(page.regions) == 1, str([r.bbox for r in page.regions]))
+    if page.regions:
+        r = page.regions[0]
+        x0, y0, x1, y1 = r.bbox
+        check("图区覆盖构造的图位置",
+              100 - 15 <= x0 and x1 <= 800 + 15 and 420 - 15 <= y0 and y1 <= 620 + 15,
+              str(r.bbox))
+        check("判为插图而非表格", r.kind == "figure", r.kind)
+        check("图注被正确挂到图区", r.caption == "图3-1测试图例", r.caption)
+
+    kept = [l["text"] for l in page.kept]
+    dropped = [l["text"] for l in page.dropped]
+    check("图内刻度被剔除", "12.80" not in kept and "12.80" in dropped, str(dropped))
+    check("图注不再重复进正文", "图3-1测试图例" not in kept)
+    check("孤立页码被剔除", "31" not in kept, str(kept))
+    check("正文一行不少", sum(1 for t in kept if t.startswith("正文")) == 9,
+          str(len(kept)))
+
+    # --- 表格判别
+    img_t, lines_t = _synthetic_page(table=True)
+    page_t = layout.analyze_page(img_t, lines_t, page_no=2)
+    check("规则网格被判为表格",
+          bool(page_t.regions) and page_t.regions[0].kind == "table",
+          str([r.kind for r in page_t.regions]))
+
+    # --- 整页图保护：整页都是图时不能把文字删光
+    whole, wl = _synthetic_page()
+    from PIL import ImageDraw
+    d = ImageDraw.Draw(whole)
+    d.rectangle([0, 0, 899, 1199], fill=0)
+    regions = [layout.Region(kind="figure", bbox=(0, 0, 900, 1200))]
+    kept2, dropped2 = layout.split_lines(wl, regions, (900, 1200))
+    check("整页图时保留全部文字", len(kept2) == len(wl) and not dropped2,
+          f"{len(kept2)}/{len(wl)}")
+
+    # --- 裁切与编码
+    data, cw, ch = layout.crop_region(img, page.regions[0]) if page.regions else (b"", 0, 0)
+    check("裁出的是 PNG", data[:8] == b"\x89PNG\r\n\x1a\n", str(data[:8]))
+    check("裁切尺寸合理", cw > 400 and ch > 100, f"{cw}x{ch}")
+
+    # --- 端到端：md 写出带图片引用，图片落盘
+    from core.model import Block, Document, ImageRef, TextDoc
+
+    asset = tmp / "p001_fig1.png"
+    asset.write_bytes(data or b"\x89PNG\r\n\x1a\n")
+
+    def _doc_with_image() -> Document:
+        doc = Document(kind="text", name="报告", source_format="pdf")
+        doc.text = TextDoc()
+        doc.text.add(Block.para("图前正文。"))
+        doc.text.add(Block.figure(ImageRef(name="p001_fig1.png", path=asset,
+                                           alt="图3-1测试图例", width=690, height=200)))
+        doc.text.add(Block.para("图后正文。"))
+        doc.assets.append(doc.text.blocks[1].image)
+        return doc
+
+    md_dir = tmp / "mdout"
+    md_dir.mkdir()
+    from core.writers import write_any
+
+    write_any(_doc_with_image(), md_dir / "报告.md", "md")
+    md = (md_dir / "报告.md").read_text("utf-8")
+    check("md 含图片引用", "![图3-1测试图例](报告_assets/p001_fig1.png)" in md, md)
+    check("图片已复制到素材目录",
+          (md_dir / "报告_assets" / "p001_fig1.png").exists())
+    check("图前后正文顺序不变",
+          md.index("图前正文") < md.index("!![") if False else
+          md.index("图前正文") < md.index("![图3-1") < md.index("图后正文"), md)
+
+    write_any(_doc_with_image(), tmp / "图.txt", "txt")
+    txt = (tmp / "图.txt").read_text("utf-8")
+    check("txt 用占位保留图注", "【图】图3-1测试图例" in txt, txt)
+
+    write_any(_doc_with_image(), tmp / "图.html", "html")
+    html = (tmp / "图.html").read_text("utf-8")
+    check("html 用 figure + figcaption",
+          "<figure>" in html and "<figcaption>图3-1测试图例</figcaption>" in html,
+          html[:200])
+
+    # --- 不导出图片时不留引用、不留目录
+    from core.writers import write_any as wa
+    n_img_dir = tmp / "noimg"
+    n_img_dir.mkdir()
+    wa(_doc_with_image(), n_img_dir / "无图.md", "md", images=False)
+    noimg = (n_img_dir / "无图.md").read_text("utf-8")
+    check("关闭图片后 md 无引用", "![" not in noimg, noimg)
+    check("关闭图片后不建素材目录", not (n_img_dir / "无图_assets").exists())
+
+
+# ================================================================ 图片输入
+def test_image_input(tmp: Path):
+    section("11. 图片 OCR")
+
+    from core.errors import SourceError
+    from core.registry import FORMATS, validate_target
+
+    check("image 是源格式", FORMATS["image"].can_read and not FORMATS["image"].can_write)
+    check("拒绝把图片作为目标", bool(validate_target("image")), validate_target("image"))
+    check("正常格式可作目标", validate_target("md") == "")
+
+    try:
+        import rapidocr_onnxruntime  # noqa: F401
+    except Exception:
+        print("\n（跳过图片识别：未安装 rapidocr-onnxruntime）")
+        return
+
+    from PIL import Image, ImageDraw, ImageFont
+
+    def _font(sz):
+        for name in ("msyh.ttc", "simhei.ttf", "simsun.ttc"):
+            try:
+                return ImageFont.truetype(name, sz)
+            except OSError:
+                continue
+        return ImageFont.load_default()
+
+    img = Image.new("RGB", (1200, 520), "white")
+    d = ImageDraw.Draw(img)
+    d.text((70, 50), "项目验收报告", font=_font(46), fill="black")
+    d.text((70, 150), "识别结果需要能复制，也要能导出。", font=_font(30), fill="black")
+    d.text((70, 220), "数字 2026 与英文 AI eye 不丢。", font=_font(30), fill="black")
+    pic = tmp / "截图.png"
+    img.save(pic)
+
+    from core.readers import read_any
+
+    try:
+        doc = read_any(pic, "image", ocr=True, assets_dir=tmp / "img_assets")
+    except Exception as exc:
+        check("图片识别不崩溃", False, f"{type(exc).__name__}: {exc}")
+        return
+
+    text = doc.as_text().plain_text()
+    check("识别出标题", "验收" in text or "报告" in text, text[:60])
+    check("数字不丢失", "2026" in text, text[:120])
+    check("英文不丢失", "eye" in text.lower(), text[:120])
+    check("原图被保留", any(b.kind == "image" for b in doc.text.blocks))
+    check("素材已落盘", bool(list((tmp / "img_assets").glob("*"))))
+
+    # 不开 OCR 时给明确提示，而不是返回空文档
+    try:
+        read_any(pic, "image", ocr=False)
+        check("图片拒绝无 OCR 转换", False, "未抛异常")
+    except SourceError as exc:
+        check("图片拒绝无 OCR 转换", "OCR" in str(exc), str(exc))
+
+    # 端到端：图片 → md，产物含原图引用
+    out = tmp / "img2md.md"
+    r = convert_one(Job(src=pic, dst=out, src_format="image", dst_format="md",
+                        options={"ocr": True}), force=True)
+    check("图片 → md 成功", r.status == "ok", r.reason)
+    if r.status == "ok":
+        body = out.read_text("utf-8")
+        check("md 引用了原图", "![" in body and "_assets" in body, body[:120])
+        check("结果预览非空", bool(r.preview.strip()))
+
+
+
 def main() -> int:
     print("=" * 66)
-    print("txt2md 2.0 转换内核测试")
+    print("AI eye 转换内核测试")
     print("=" * 66)
 
-    tmp = Path(tempfile.mkdtemp(prefix="txt2md-test-"))
+    tmp = Path(tempfile.mkdtemp(prefix="aieye-test-"))
     try:
         test_encoding(tmp)
         test_inline_strip()
@@ -467,6 +765,9 @@ def main() -> int:
         test_fidelity(tmp)
         test_safety(tmp)
         test_matrix(tmp)
+        test_ocr(tmp)
+        test_layout(tmp)
+        test_image_input(tmp)
         test_verify(tmp)
         test_cli_output(tmp)
     finally:

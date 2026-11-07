@@ -26,8 +26,8 @@ jobs:
       - name: 命令行零依赖校验（不安装任何第三方包）
         shell: pwsh
         run: |
-          python txt2md.py --version
-          python txt2md.py tests/sample -o tests/out --overwrite
+          python aieye.py --version
+          python aieye.py tests/sample -o tests/out --overwrite
           if (Test-Path tests/out/gbk_note.md) { Get-Content tests/out/gbk_note.md }
 
       - name: 安装界面依赖
@@ -81,9 +81,9 @@ jobs:
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: txt2md-win64
+          name: AIeye-win64
           path: |
-            dist/txt2md.exe
+            dist/AIeye.exe
             dist/*.zip
             dist/*.whl
             dist/*.tar.gz

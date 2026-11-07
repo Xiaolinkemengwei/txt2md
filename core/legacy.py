@@ -9,7 +9,7 @@
 
 其他转换方向（涉及 docx/xlsx/pdf 等）才走 core.model 的块管线。
 
-对应 1.0 源码：txt2md.py 的 read_text_smart / smart_line / to_markdown。
+对应 1.0 源码：aieye.py（原 txt2md.py）的 read_text_smart / smart_line / to_markdown。
 """
 
 from __future__ import annotations

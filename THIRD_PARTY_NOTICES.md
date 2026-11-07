@@ -11,15 +11,15 @@
 - 许可全文：https://www.gnu.org/licenses/lgpl-3.0.html
 - Qt 许可说明：https://www.qt.io/licensing/open-source-lgpl-obligations
 
-**分发说明**：打包的 `txt2md.exe` 通过 PyInstaller 将 Qt 动态库一并封装。LGPL-3.0 允许以
+**分发说明**：打包的 `AIeye.exe` 通过 PyInstaller 将 Qt 动态库一并封装。LGPL-3.0 允许以
 动态链接方式分发，前提是保留本声明、提供对应许可文本，并允许使用者替换 Qt 库。
 本项目全部源码公开，任何人均可用 `python tools/build.py` 重新构建并替换其中的 Qt 组件，
 满足重新链接的要求。若你需要完全规避 LGPL 义务，可仅使用本项目的命令行部分
-（`txt2md.py`，纯标准库，不依赖 Qt）。
+（`aieye.py`，纯标准库，不依赖 Qt）。
 
-## 文档格式处理库（2.0 新增）
+## 文档格式处理库
 
-2.0 起支持多格式互转，引入以下纯 Python 库。全部为宽松许可（MIT / BSD），
+多格式互转依赖以下库。全部为宽松许可（MIT / BSD / Apache-2.0），
 不产生与本项目 MIT 许可的冲突。
 
 | 组件 | 许可 | 用途 | 是否打包进 exe |
@@ -32,6 +32,20 @@
 | [lxml](https://lxml.de/) | BSD-3-Clause | python-docx 的 XML 后端 | 是 |
 | [Pillow](https://python-pillow.org/) | HPND | pdfplumber 处理图像对象 | 是 |
 | [pypandoc](https://github.com/JessicaTegner/pypandoc) | MIT | 可选兜底通道，**不打包** | 否 |
+
+### 扫描件 OCR（2.0 起内置）
+
+| 组件 | 许可 | 用途 | 是否打包进 exe |
+| --- | --- | --- | --- |
+| [RapidOCR](https://github.com/RapidAI/RapidOCR) | Apache-2.0 | 文字检测与识别，模型随包分发 | 是 |
+| [ONNX Runtime](https://github.com/microsoft/onnxruntime) | MIT | 推理运行时 | 是 |
+| [OpenCV (headless)](https://opencv.org/) | Apache-2.0 | 图像预处理、版面切分（掩膜与形态学连块） | 是 |
+| [NumPy](https://numpy.org/) | BSD-3-Clause | 数组运算、图区暗像素统计 | 是 |
+| [pyclipper](https://github.com/fonttools/pyclipper) | MIT | 检测框后处理 | 是 |
+| [Shapely](https://github.com/shapely/shapely) | BSD-3-Clause | 几何计算 | 是 |
+
+OCR 模型（`det` / `cls` / `rec` 三个 `.onnx` 文件）来自 RapidOCR 官方发行版，
+遵循 PaddleOCR 的 Apache-2.0 许可。全部推理在本机完成，不上传任何文件。
 
 **关于 pypandoc / pandoc**：本项目**不**将 pandoc 作为主引擎，仅在内置实现失败时
 作为可选兜底。`pypandoc-binary` 会额外引入约 231 MB 的 pandoc 可执行文件，

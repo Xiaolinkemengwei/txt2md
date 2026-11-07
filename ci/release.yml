@@ -30,8 +30,8 @@ jobs:
           QT_QPA_PLATFORM: offscreen
           QT_QPA_FONTDIR: C:\Windows\Fonts
         run: |
-          python txt2md.py --version
-          python txt2md.py tests/sample -o tests/out --overwrite
+          python aieye.py --version
+          python aieye.py tests/sample -o tests/out --overwrite
           python tests/test_gui_flow.py
 
       - name: 构建全部产物
@@ -43,10 +43,10 @@ jobs:
       - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: txt2md ${{ github.ref_name }}
+          name: AI eye ${{ github.ref_name }}
           generate_release_notes: true
           files: |
-            dist/txt2md.exe
+            dist/AIeye.exe
             dist/*.zip
             dist/*.whl
             dist/*.tar.gz

@@ -17,13 +17,14 @@ import csv
 import io
 import re
 import sys
+import tempfile
 import zipfile
 from pathlib import Path
 
 from .errors import DependencyMissing, SourceError
 from .mdparse import parse_markdown
-from .model import (Block, Document, Sheet, TextDoc, Workbook, looks_like_prose_sheet,
-                    normalize_newlines, prose_sheet_to_doc)
+from .model import (Block, Document, ImageRef, Sheet, TextDoc, Workbook,
+                    looks_like_prose_sheet, normalize_newlines, prose_sheet_to_doc)
 from .registry import format_of_path, resolve_format
 
 # ---------------------------------------------------------------- 编码探测
@@ -276,8 +277,7 @@ def read_xlsx_file(path: Path, *, sheets: list[str] | None = None) -> Document:
     try:
         import openpyxl
     except ImportError as exc:
-        raise DependencyMissing("读取 xlsx 需要 openpyxl",
-                                hint="python -m pip install openpyxl") from exc
+        raise DependencyMissing.for_import(exc, "读取 xlsx", "openpyxl") from exc
 
     def _load(source):
         return openpyxl.load_workbook(source, data_only=True, read_only=False)
@@ -439,8 +439,7 @@ def read_docx_file(path: Path) -> Document:
         from docx.table import Table
         from docx.text.paragraph import Paragraph
     except ImportError as exc:
-        raise DependencyMissing("读取 docx 需要 python-docx",
-                                hint="python -m pip install python-docx") from exc
+        raise DependencyMissing.for_import(exc, "读取 docx", "python-docx") from exc
 
     try:
         d = docx.Document(str(path))
@@ -541,8 +540,26 @@ def _pdf_real_tables(page) -> list[tuple[tuple[float, float, float, float], list
     「表格」——放任不管的话，整篇文章会塌成一张表，而且表格区和正文区各被
     提取一次，内容直接翻倍。所以这里先把不像表格的候选丢掉。
     """
+    page_area = max(1.0, float(page.width) * float(page.height))
+
+    def _not_page_frame(obj) -> bool:
+        # 整页边框（HTML 打印版式的 body 外框）会把真表格的网格、引用竖线、
+        # 标题下划线全部串成一张覆盖整页的假表——真表反而找不到了。
+        # 先把这种巨型矩形剔除，剩下的边线才构成真的表格网格。
+        if obj.get("object_type") != "rect":
+            return True
+        w = float(obj.get("x1") or 0) - float(obj.get("x0") or 0)
+        h = float(obj.get("bottom") or 0) - float(obj.get("top") or 0)
+        return w * h <= page_area * 0.4
+
     try:
-        found = page.find_tables()
+        finder = page
+        if hasattr(page, "filter"):
+            try:
+                finder = page.filter(_not_page_frame)
+            except Exception:
+                finder = page
+        found = finder.find_tables()
     except Exception:
         return []
 
@@ -597,21 +614,34 @@ def _pdf_real_tables(page) -> list[tuple[tuple[float, float, float, float], list
 _PDF_LIST_RE = re.compile(r"^\s*(?:[-*•·▪◦‣]|\d{1,2}[.)、]|[（(]\d{1,2}[)）])\s+")
 # 出现在行尾就认为一句话说完了，下一行另起段落
 _PDF_SENT_END = ("。", "！", "？", "；", "：", ".", "!", "?", ";", ":", "”", "）", "】")
+# 句中标点：标题里极少出现逗号分号，出现就说明这是一句话
+_SENT_PUNCT = re.compile(r"[，。；！？,;]")
+
+
+def _looks_like_heading(text: str, ocr: bool) -> bool:
+    """字号明显偏大的行，是否够格当标题。
+
+    文字层里字号是排版属性，很可靠；OCR 里它是外接框高度，长句带括号时
+    会被撑高。所以 OCR 路径额外要求「长句不得含句中标点」。
+    """
+    if len(text) > (60 if ocr else 80):
+        return False
+    # 纯数字行不是标题：页码（31）、图表编号（2-13）都会因为短而被判大字号
+    if text.strip().isdigit():
+        return False
+    if ocr and len(text) > 20 and _SENT_PUNCT.search(text):
+        return False
+    return True
 
 
 def _pdf_page_blocks(page) -> list[Block]:
-    """把一页的文字行还原成块序列。
-
-    PDF 只记录「哪几个字画在哪个坐标」，没有段落和标题的概念。这里靠两条
-    弱信号猜：字号比正文明显大的行当标题，行尾标点决定段落在哪断。猜错的
-    最坏结果是段落划分不理想，文字本身不会丢——这符合 PDF 的 ○ 级保真定位。
-    """
+    """把一页的文字行还原成块序列（文字层路径）。"""
     try:
         lines = page.extract_text_lines()
     except Exception:
         lines = []
 
-    info: list[tuple[str, float, bool, float]] = []
+    info: list[dict] = []
     for ln in lines or []:
         text = (ln.get("text") or "").strip()
         if not text:
@@ -619,7 +649,10 @@ def _pdf_page_blocks(page) -> list[Block]:
         chars = ln.get("chars") or []
         size = max((float(c.get("size") or 0) for c in chars), default=0.0)
         bold = any("bold" in str(c.get("fontname") or "").lower() for c in chars)
-        info.append((text, size, bold, float(ln.get("x0") or 0.0)))
+        info.append({"text": text, "size": size, "bold": bold,
+                     "x0": float(ln.get("x0") or 0.0),
+                     "top": float(ln.get("top") or 0.0),
+                     "bottom": float(ln.get("bottom") or 0.0)})
 
     if not info:
         # 老版本 pdfplumber 没有 extract_text_lines，退回整段文本
@@ -630,45 +663,96 @@ def _pdf_page_blocks(page) -> list[Block]:
         return [b for b in blocks_of_text(text, start_heading=False).blocks
                 if b.kind != "table"]
 
+    # 引用竖线只存在于矢量矩形里（文字层没有），在这里取出来交给重建逻辑
+    rects = []
+    try:
+        rects = [r for r in page.rects
+                 if float(r.get("x1") or 0) - float(r.get("x0") or 0) <= 6
+                 and float(r.get("bottom") or 0) - float(r.get("top") or 0) >= 8]
+    except Exception:
+        rects = []
+    return _blocks_from_lines(info, rects)
+
+
+def _blocks_from_lines(info: list[dict], rects: list, *, ocr: bool = False) -> list[Block]:
+    """把行信息（text/size/bold/x0/top/bottom）还原成块序列。
+
+    文字层路径与 OCR 路径共用：OCR 结果的框坐标正好提供 x0 与框高，
+    走的完全是同一套弱信号推断。PDF 只记录「哪几个字画在哪个坐标」，
+    没有段落和标题的概念，这里靠几条弱信号猜：字号比正文明显大的行当
+    标题，行尾标点决定段落在哪断，左侧的细长竖条是引用边线，剩余的
+    缩进档位是列表层级。猜错的最坏结果是段落划分不理想，文字本身不会
+    丢——这符合 PDF 的 ○ 级保真定位。
+
+    ``ocr=True`` 时收紧标题判定：OCR 的「字号」其实是外接框高度，行内
+    出现括号、数字、下标就会把框撑高，一个普通长句因此被判成标题（实测
+    「如图2-14所示，是美尔雅（600107）的日K线走势图…」整行变成了 h3）。
+    """
+    # 引用识别：HTML 打印版式里 blockquote 画一条细长竖线（宽几磅、高度
+    # 覆盖整段），文字从竖线右侧缩进一点开始。竖线不在文字层，只能看 rect。
+    # 注意引用的悬挂缩进会污染列表的缩进档位，必须先把引用行挑出来排除掉。
+    quotes: list[bool] = []
+    for it in info:
+        hit = False
+        for r in rects:
+            rx0 = float(r.get("x0") or 0)
+            rx1 = float(r.get("x1") or 0)
+            rtop = float(r.get("top") or 0)
+            rbot = float(r.get("bottom") or 0)
+            if (rx1 <= it["x0"] + 2 and rx0 >= it["x0"] - 24
+                    and rtop <= it["bottom"] - 2 and rbot >= it["top"] + 2):
+                hit = True
+                break
+        quotes.append(hit)
+
     # 基准字号：按字符数加权取众数，比平均数更抗「少数大标题」的影响
     weight: dict[float, int] = {}
-    for text, size, _b, _x in info:
-        key = round(size, 1)
-        weight[key] = weight.get(key, 0) + len(text)
+    for it in info:
+        key = round(it["size"], 1)
+        weight[key] = weight.get(key, 0) + len(it["text"])
     base = max(weight.items(), key=lambda kv: kv[1])[0] if weight else 0.0
 
     # 比正文大 15% 以上的字号，从大到小映射到 h1 / h2 / h3 …
-    head_sizes = sorted({round(s, 1) for _, s, _b, _x in info
-                         if base and s >= base * 1.15}, reverse=True)
+    head_sizes = sorted({round(it["size"], 1) for it in info
+                         if base and it["size"] >= base * 1.15}, reverse=True)
     level_of = {s: min(6, i + 1) for i, s in enumerate(head_sizes)}
 
-    # 列表靠左缩进认：PDF 里项目符号是画出来的图形，文字层没有 "- "，
-    # 但缩进会如实保留。以最靠左的行为基准，最小正缩进量当作一级步长。
+    # 列表靠左缩进认：PDF 里项目符号常是画出来的图形，文字层没有 "- "，
+    # 但缩进会如实保留。把出现过的缩进量分成档位，每一档就是一层列表——
+    # 不能用「缩进 ÷ 最小步长」取整：列表在 17.6、嵌套在 27.6 时，
+    # 17.6/17.6 和 27.6/17.6 取整都是 1，嵌套就被拍平了。
     # 下限取一个正文字符宽——表格单元格之间常有几磅的位置差，那种不算缩进。
-    left = min((x for _t, _s, _b, x in info), default=0.0)
+    # 引用行不参与：引用的悬挂缩进（如 58.2）会挤掉列表的顶层档位。
+    left = min((it["x0"] for it, q in zip(info, quotes) if not q), default=0.0)
     min_gap = max(6.0, base)
-    steps = sorted({round(x - left, 1) for _t, _s, _b, x in info
-                    if x - left >= min_gap})
-    step = steps[0] if steps else 0.0
+    if ocr:
+        # 扫描件放弃「按缩进认列表」：中文正文段首缩进两个字符，与列表缩进
+        # 在几何上完全同构，而 OCR 的 x0 还有几像素抖动。实测一本书几乎每个
+        # 段落首行都会被判成列表项（「在使用上升旗形买入方法时…」变成 L2 的
+        # 单条列表）。扫描件只认显式项目符号：- • 1. 这类。
+        ranks: dict[float, int] = {}
+    else:
+        ranks = {ind: i for i, ind in enumerate(sorted(
+            {round(it["x0"] - left, 1) for it, q in zip(info, quotes)
+             if not q and it["x0"] - left >= min_gap}))}
 
     # 层级用 None 表示「这一行不是列表项」——0 是合法层级（顶层列表），
     # 两者不能用同一个值表示，否则顶层列表整段会被当成普通段落。
-    raw_level: list[int | None] = []
-    for text, _size, _bold, x0 in info:
+    levels: list[int | None] = []
+    for it, q in zip(info, quotes):
+        if q:
+            levels.append(None)
+            continue
         lvl: int | None = None
-        if step and len(text) <= 24 and x0 - left >= step * 0.8:
-            lvl = max(1, int((x0 - left) / step))
-        raw_level.append(lvl)
-    # 层级整体下移到从 0 开始：缩进最浅的那一级才是顶层列表，
-    # 否则最外层列表会被缩进两个空格，Markdown 里语义就变了。
-    positive = [l for l in raw_level if l is not None]
-    base_level = min(positive) if positive else 0
-    levels = [None if l is None else l - base_level for l in raw_level]
+        if len(it["text"]) <= 24 and round(it["x0"] - left, 1) in ranks:
+            lvl = ranks[round(it["x0"] - left, 1)]
+        levels.append(lvl)
 
     blocks: list[Block] = []
     para: list[str] = []
     items: list[str] = []
     item_level = 0
+    quote_text: list[str] = []
 
     def flush_para() -> None:
         if para:
@@ -680,13 +764,27 @@ def _pdf_page_blocks(page) -> list[Block]:
             blocks.append(Block(kind="list", items=list(items), level=item_level))
             items.clear()
 
-    for idx, (text, size, _bold, x0) in enumerate(info):
-        key = round(size, 1)
-        if key in level_of and len(text) <= 80:
+    def flush_quote() -> None:
+        if quote_text:
+            blocks.append(Block(kind="quote", text="\n".join(quote_text)))
+            quote_text.clear()
+
+    for idx, it in enumerate(info):
+        text = it["text"]
+        key = round(it["size"], 1)
+        if key in level_of and _looks_like_heading(text, ocr):
             flush_para()
             flush_list()
+            flush_quote()
             blocks.append(Block(kind="heading", text=text, level=level_of[key]))
             continue
+
+        if quotes[idx]:
+            flush_para()
+            flush_list()
+            quote_text.append(text)
+            continue
+        flush_quote()
 
         lvl = levels[idx]
         m = _PDF_LIST_RE.match(text)
@@ -724,31 +822,142 @@ def _pdf_page_blocks(page) -> list[Block]:
 
     flush_para()
     flush_list()
+    flush_quote()
     return blocks
 
 
-def read_pdf_file(path: Path, *, max_pages: int = 0) -> Document:
+# ---------------------------------------------------------------- 图片资产
+def _asset_dir(explicit: str | Path | None) -> Path:
+    """准备图片落地目录。显式传入时用它（pipeline 的临时目录），否则自建。"""
+    if explicit:
+        p = Path(explicit)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    # 单独调用 read_any（不经 pipeline）时没人负责清理；宁可留几十 MB 临时
+    # 文件，也不能让整次转换失败。
+    return Path(tempfile.mkdtemp(prefix="aieye-assets-"))
+
+
+def _save_figure(image, region, asset_root: Path | None, stem: str,
+                 page_no: int, *, max_width: int = 1400) -> ImageRef | None:
+    """裁出一个图区并存盘，返回图片引用。asset_root 为空时不产图。"""
+    if asset_root is None:
+        return None
+    from . import layout as layout_mod
+    try:
+        data, w, h = layout_mod.crop_region(image, region, max_width=max_width)
+    except Exception:
+        return None                        # 单张裁切失败不该拖垮整页
+    name = f"{stem}_p{page_no:03d}_fig{region.index}.png"
+    target = Path(asset_root) / name
+    try:
+        target.write_bytes(data)
+    except OSError as exc:
+        raise SourceError(f"无法保存插图 {name}：{exc}") from exc
+    return ImageRef(name=name, path=target,
+                    alt=region.caption or f"第 {page_no} 页插图",
+                    width=w, height=h)
+
+
+def _blocks_with_figures(lines: list[dict], regions: list, image,
+                         asset_root: Path | None, stem: str,
+                         page_no: int) -> list[Block]:
+    """按纵坐标把「正文段」与「插图」交错排好。
+
+    不能简单地「文字全部在前、图全部在后」：一本书的版面是「一段话、一张图、
+    一段话」，顺序错了整章读起来就是脱节的。
+    """
+    out: list[Block] = []
+    idx = 0
+    for r in regions:
+        seg: list[dict] = []
+        while idx < len(lines) and float(lines[idx].get("top", 0)) < r.bbox[1] - 2:
+            seg.append(lines[idx])
+            idx += 1
+        if seg:
+            out.extend(_blocks_from_lines(seg, [], ocr=True))
+        ref = _save_figure(image, r, asset_root, stem, page_no)
+        if ref is not None:
+            out.append(Block.figure(ref))
+        # 图区范围内的行已在 split_lines 里剔除，这里只推进指针
+        while idx < len(lines) and float(lines[idx].get("top", 0)) < r.bbox[3]:
+            idx += 1
+    tail = lines[idx:]
+    if tail:
+        out.extend(_blocks_from_lines(tail, [], ocr=True))
+    return out
+
+
+def read_pdf_file(path: Path, *, max_pages: int = 0, ocr: bool = False,
+                  images: bool = True, assets_dir: str | Path | None = None,
+                  layout: bool = True) -> Document:
     try:
         import pdfplumber
     except ImportError as exc:
-        raise DependencyMissing("读取 PDF 需要 pdfplumber",
-                                hint="python -m pip install pdfplumber") from exc
+        raise DependencyMissing.for_import(exc, "读取 PDF", "pdfplumber") from exc
 
     # pdfminer 遇到字体信息不全的 PDF 会往 stderr 刷 FontBBox 警告，内容其实读得出，
     # 但对用户来说像是出错了。压到 ERROR，真正的失败仍会抛异常。
     import logging
     logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
+    # 连续这么多页都没有文字层，就认定整份是扫描件，立刻失败。
+    # 扫描书常见 200+ 页，全跑一遍要几分钟才说「没有文本」，用户会以为程序卡死。
+    NO_TEXT_STREAK = 3
+
     doc = Document(kind="text", name=path.stem, source_format="pdf")
     doc.text = TextDoc()
     total_chars = 0
+    ocr_pages = 0
+    blank_pages: list[int] = []
+    streak = 0
+    figure_count = 0
+    dropped_total = 0
+    # 只有真要 OCR 才准备资产目录：纯文字 PDF 不该凭空生成一个空文件夹
+    asset_root = _asset_dir(assets_dir) if (ocr and images) else None
 
-    def emit(page_obj) -> None:
+    def emit(page_obj, text: str) -> None:
         nonlocal total_chars
-        raw = page_obj.extract_text() or ""
-        total_chars += len(raw.strip())
+        total_chars += len(text.strip())
         for b in _pdf_page_blocks(page_obj):
             doc.text.add(b)
+
+    def emit_ocr(page_obj, idx: int) -> None:
+        """页面没有文字层时的兜底：渲染成图后 OCR，再走同一套块重建。
+
+        扫描书的图（K 线、示意图）里带坐标轴刻度和气泡标注，整页 OCR 会把
+        它们识别成正文行——第 41 页 27 行里有 8 行是「3.60 / 2.80」这类刻度。
+        所以先做版面切分：图内行剔掉，图本身裁出来落成图片块。
+        """
+        nonlocal total_chars, ocr_pages, figure_count, dropped_total
+        from .ocr import ocr_page_lines
+        try:
+            image = page_obj.to_image(resolution=200).original
+        except Exception as exc:
+            raise SourceError(f"第 {idx} 页无法渲染成图像：{exc}") from exc
+        infos = ocr_page_lines(image)
+        total_chars += sum(len(it["text"]) for it in infos)
+        ocr_pages += 1
+
+        if not layout or not infos:
+            for b in _blocks_from_lines(infos, [], ocr=True):
+                doc.text.add(b)
+            return
+
+        from . import layout as layout_mod
+        page = layout_mod.analyze_page(image, infos, page_no=idx)
+        dropped_total += len(page.dropped)
+        if page.regions:
+            for b in _blocks_with_figures(page.kept, page.regions, image,
+                                          asset_root, path.stem, idx):
+                if b.kind == "image":
+                    figure_count += 1
+                    if b.image is not None:
+                        doc.assets.append(b.image)
+                doc.text.add(b)
+        else:
+            for b in _blocks_from_lines(infos, [], ocr=True):
+                doc.text.add(b)
 
     try:
         with pdfplumber.open(str(path)) as pdf:
@@ -756,13 +965,25 @@ def read_pdf_file(path: Path, *, max_pages: int = 0) -> Document:
             if not pages:
                 raise SourceError(f"{path.name} 没有页面")
             for idx, page in enumerate(pages, 1):
+                text = page.extract_text() or ""
                 tables = _pdf_real_tables(page)
+                if not text.strip() and not tables:
+                    if ocr:
+                        streak = 0
+                        emit_ocr(page, idx)
+                        continue
+                    streak += 1
+                    blank_pages.append(idx)
+                    if streak >= NO_TEXT_STREAK and total_chars == 0:
+                        raise SourceError(
+                            f"{path.name} 是扫描版 PDF：前 {idx} 页都没有文字层",
+                            hint="扫描件的内容是图片。命令行加 --ocr、界面勾选"
+                                 "「OCR 识别扫描件」即可直接识别；OCR 较慢，每页约几秒")
+                    continue
+                streak = 0
+
                 if not tables:
-                    if (page.extract_text() or "").strip():
-                        emit(page)
-                    else:
-                        doc.warnings.append(
-                            f"第 {idx} 页没有文本层，已跳过（可能是扫描件）")
+                    emit(page, text)
                     continue
 
                 # 按表格把页面切成若干水平带：带内取正文，表格位置放表格。
@@ -771,7 +992,8 @@ def read_pdf_file(path: Path, *, max_pages: int = 0) -> Document:
                 for (x0, top, x1, bottom), rows in tables:
                     if top - cursor > 2:
                         try:
-                            emit(page.crop((0, cursor, page.width, top)))
+                            band = page.crop((0, cursor, page.width, top))
+                            emit(band, band.extract_text() or "")
                         except Exception:
                             pass
                     doc.text.add(Block(kind="table", rows=rows, header=True))
@@ -779,7 +1001,8 @@ def read_pdf_file(path: Path, *, max_pages: int = 0) -> Document:
                     cursor = max(cursor, bottom)
                 if page.height - cursor > 2:
                     try:
-                        emit(page.crop((0, cursor, page.width, page.height)))
+                        band = page.crop((0, cursor, page.width, page.height))
+                        emit(band, band.extract_text() or "")
                     except Exception:
                         pass
     except SourceError:
@@ -787,9 +1010,133 @@ def read_pdf_file(path: Path, *, max_pages: int = 0) -> Document:
     except Exception as exc:
         raise SourceError(f"无法读取 {path.name}：{exc}") from exc
 
+    # 少量无文字页（插图、扉页）不算失败，合并成一条提示，不逐页刷屏
+    if figure_count:
+        doc.warnings.append(
+            f"识别到 {figure_count} 张插图，已裁出；图内的 {dropped_total} 行刻度与"
+            f"标注未计入正文（导出 md/docx 可看到图片）")
+    if ocr_pages:
+        doc.warnings.append(f"{ocr_pages} 页没有文字层，已用 OCR 识别（文字可能有误，"
+                            "请抽查关键字段）")
+    elif blank_pages and total_chars:
+        doc.warnings.append(f"{len(blank_pages)} 页没有文字层（多为插图页），已跳过")
+
     if total_chars == 0 and not any(b.kind == "table" for b in doc.text.blocks):
         raise SourceError(f"{path.name} 没有可提取的文本",
-                          hint="扫描版 PDF 需先做 OCR；本工具不做 OCR")
+                          hint="命令行加 --ocr 可识别扫描件（较慢）")
+    return doc
+
+
+# ---------------------------------------------------------------- 图片
+# 尺寸归一区间。低于 1500px 宽时 OCR 对小字几乎无能为力（截图常见 800px）；
+# 高于 2400px 只会拖慢识别，精度不再提升。
+IMAGE_MIN_WIDTH = 1500
+IMAGE_MAX_WIDTH = 2400
+
+
+def _fit_image_size(img):
+    from PIL import Image
+
+    w, h = img.size
+    if not w or not h:
+        return img
+    if w < IMAGE_MIN_WIDTH:
+        ratio = IMAGE_MIN_WIDTH / float(w)
+        return img.resize((IMAGE_MIN_WIDTH, max(1, int(h * ratio))), Image.LANCZOS)
+    if w > IMAGE_MAX_WIDTH:
+        ratio = IMAGE_MAX_WIDTH / float(w)
+        return img.resize((IMAGE_MAX_WIDTH, max(1, int(h * ratio))), Image.LANCZOS)
+    return img
+
+
+def _save_original(path: Path, img, asset_root: Path) -> ImageRef | None:
+    """把原图（必要时缩到 1600px）存进资产目录。
+
+    照片用 JPEG（PNG 存照片能大十倍），线稿和截图用 PNG。判据是扩展名——
+    用户从手机相册拿的都是 jpg，从截图工具拿的都是 png，这个假设足够稳。
+    """
+    from PIL import Image
+
+    if img.width > 1600:
+        ratio = 1600 / float(img.width)
+        img = img.resize((1600, max(1, int(img.height * ratio))), Image.LANCZOS)
+
+    # 按内容而不是扩展名决定编码：颜色数少的是扫描页/截图/线稿，量化成
+    # 256 色 PNG 肉眼无差；颜色多的是照片，PNG 会大到十倍，改用 JPEG。
+    try:
+        if img.getcolors(maxcolors=4096) is not None:
+            name = f"{path.stem}_orig.png"
+            img.quantize(colors=256).save(asset_root / name, "PNG", optimize=True)
+        else:
+            name = f"{path.stem}_orig.jpg"
+            img.convert("RGB").save(asset_root / name, "JPEG",
+                                    quality=85, optimize=True)
+    except Exception:
+        return None
+    return ImageRef(name=name, path=asset_root / name, alt=f"原图 {path.name}",
+                    width=img.width, height=img.height)
+
+
+def read_image_file(path: Path, *, ocr: bool = True, images: bool = True,
+                    assets_dir: str | Path | None = None,
+                    layout: bool = True) -> Document:
+    """图片 → 文本：OCR 识别，并把原图作为插图保留。
+
+    图片没有文字层，OCR 不是「可选增强」而是唯一途径，因此这里不接受
+    ocr=False——与其返回一份空文档让用户以为转换成功，不如明确报错。
+    """
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise DependencyMissing.for_import(exc, "读取图片", "pillow") from exc
+
+    from .ocr import ocr_page_lines
+
+    if not ocr:
+        raise SourceError(f"{path.name} 是图片，必须经过 OCR 才能转成文本",
+                          hint="命令行加 --ocr，界面里 OCR 开关会自动开启")
+
+    doc = Document(kind="text", name=path.stem, source_format="image")
+    doc.text = TextDoc()
+    doc.source_title = path.stem
+
+    try:
+        with Image.open(path) as raw:
+            fixed = ImageOps.exif_transpose(raw)          # 手机照片带旋转标记
+            img = fixed.convert("RGB") if fixed.mode not in ("L", "RGB") else fixed.copy()
+    except Exception as exc:
+        raise SourceError(f"无法打开图片 {path.name}：{exc}") from exc
+
+    img = _fit_image_size(img)
+    infos = ocr_page_lines(img)
+
+    # 原图放最前：用户要的是「图 + 识别文字」一起导出，图是参照物
+    asset_root = _asset_dir(assets_dir) if images else None
+    if asset_root is not None:
+        ref = _save_original(path, img, asset_root)
+        if ref is not None:
+            doc.assets.append(ref)
+            doc.text.add(Block.figure(ref))
+
+    page = None
+    if layout and infos:
+        from . import layout as layout_mod
+        page = layout_mod.analyze_page(img, infos, page_no=1)
+
+    # 图片里如果有图表，图内文字同样要剔除——否则截图里的刻度会混进正文。
+    # 但不额外裁子图：原图已经在上面了，再裁一张只是重复。
+    kept = page.kept if (page is not None and page.regions) else infos
+    for b in _blocks_from_lines(kept, [], ocr=True):
+        doc.text.add(b)
+
+    if page is not None and page.dropped:
+        doc.warnings.append(
+            f"图内有 {len(page.dropped)} 行文字（刻度、标注）已跳过，"
+            f"另存为文档可看到原图")
+
+    if not infos:
+        raise SourceError(f"{path.name} 没有识别到文字",
+                          hint="换一张更清晰的图；截图建议放大到 1500px 宽以上")
     return doc
 
 
@@ -802,6 +1149,7 @@ READERS = {
     "xlsx": read_xlsx_file,
     "docx": read_docx_file,
     "pdf": read_pdf_file,
+    "image": read_image_file,
 }
 
 

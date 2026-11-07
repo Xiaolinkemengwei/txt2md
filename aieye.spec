@@ -2,17 +2,17 @@
 """PyInstaller 打包配置。
 
 用法:
-    pyinstaller --noconfirm txt2md.spec              # 单文件 exe（默认）
-    set TXT2MD_ONEFILE=0 && pyinstaller --noconfirm txt2md.spec   # 目录版（启动更快）
+    pyinstaller --noconfirm aieye.spec              # 单文件 exe（默认）
+    set AIEYE_ONEFILE=0 && pyinstaller --noconfirm aieye.spec     # 目录版（启动更快）
 
-版本号唯一来源是 txt2md.py 的 __version__，此处自动读取并写入 Windows 版本资源。
+版本号唯一来源是 aieye.py 的 __version__，此处自动读取并写入 Windows 版本资源。
 """
 
 import os
 import re
 
 ROOT = os.path.abspath(os.getcwd())
-ENTRY = os.path.join(ROOT, "txt2md.py")
+ENTRY = os.path.join(ROOT, "aieye.py")
 
 # ---- 从源码读取版本号，避免多处维护
 with open(ENTRY, encoding="utf-8") as f:
@@ -20,7 +20,7 @@ with open(ENTRY, encoding="utf-8") as f:
 VER_TUPLE = tuple(int(p) for p in VERSION.split(".")) + (0,)
 VER_STR = VERSION
 
-ONEFILE = os.environ.get("TXT2MD_ONEFILE", "1") == "1"
+ONEFILE = os.environ.get("AIEYE_ONEFILE", "1") == "1"
 
 # ---- 生成 Windows 版本资源（文件属性里显示的版本/说明）
 os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
@@ -33,13 +33,13 @@ with open(VERSION_FILE, "w", encoding="utf-8") as f:
   ),
   kids=[
     StringFileInfo([StringTable('080404B0', [
-      StringStruct('CompanyName', 'txt2md contributors'),
-      StringStruct('FileDescription', '文档格式互转工具（txt/md/html/csv/xlsx/docx/pdf）'),
+      StringStruct('CompanyName', 'AI eye contributors'),
+      StringStruct('FileDescription', 'AI eye 文档格式互转（txt/md/html/csv/xlsx/docx/pdf + OCR）'),
       StringStruct('FileVersion', '{VER_STR}'),
-      StringStruct('InternalName', 'txt2md'),
+      StringStruct('InternalName', 'AIeye'),
       StringStruct('LegalCopyright', 'MIT License'),
-      StringStruct('OriginalFilename', 'txt2md.exe'),
-      StringStruct('ProductName', 'txt2md'),
+      StringStruct('OriginalFilename', 'AIeye.exe'),
+      StringStruct('ProductName', 'AI eye'),
       StringStruct('ProductVersion', '{VER_STR}')
     ])]),
     VarFileInfo([VarStruct('Translation', [2052, 1200])])
@@ -66,27 +66,53 @@ HIDDEN = [
     "gui", "gui.app", "gui.theme", "gui.widgets",
     "core", "core.model", "core.mdparse", "core.htmlio", "core.readers",
     "core.writers", "core.registry", "core.pipeline", "core.legacy",
-    "core.errors", "core.pandoc_fallback",
+    "core.errors", "core.pandoc_fallback", "core.ocr", "core.layout",
     # 格式编解码
     "openpyxl", "openpyxl.styles", "openpyxl.utils",
     "docx", "pdfplumber", "charset_normalizer",
     "pdfminer", "pdfminer.high_level", "pdfminer.pdfinterp",
     "lxml", "lxml.etree", "PIL.Image",
+    # 扫描件 OCR（模型随包分发，见下方数据收集）
+    "rapidocr_onnxruntime", "onnxruntime", "cv2", "numpy",
+    "pyclipper", "shapely",
 ]
 
-# pdfminer 依赖 CMap 等数据文件，漏了会导致中文 PDF 解析失败
-from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
+from PyInstaller.utils.hooks import (collect_data_files,  # noqa: E402
+                                     collect_dynamic_libs, collect_submodules)
+
+# PDF 读不出来是打包版最容易踩的坑：pdfplumber 只列顶层模块不够，
+# 它的 pdfplumber.page / pdfplumber.display 等子模块、以及 pypdfium2 的
+# Python 层和 pdfium.dll 都可能在静态分析时漏掉，运行时才抛 ImportError。
+# 这里按包名整体收，宁可多打几 MB 也不要「装了依赖却用不了」。
+for pkg in ("pdfplumber", "pdfminer", "pypdfium2", "pypdfium2_raw",
+            "rapidocr_onnxruntime", "onnxruntime", "cv2"):
+    try:
+        HIDDEN += collect_submodules(pkg)
+    except Exception:
+        pass
+
+# pdfminer 依赖 CMap 等数据文件，漏了会导致中文 PDF 解析失败；
+# rapidocr 的识别模型（det/rec_cls 的 onnx 文件）也在包数据里，漏了 OCR 直接失效
 DATAS = []
-for pkg in ("pdfminer", "charset_normalizer", "docx"):
+for pkg in ("pdfminer", "charset_normalizer", "docx", "pdfplumber",
+            "pypdfium2", "pypdfium2_raw",
+            "rapidocr_onnxruntime", "onnxruntime"):
     try:
         DATAS += collect_data_files(pkg)
+    except Exception:
+        pass
+
+BINARIES = []
+for pkg in ("pypdfium2_raw", "pypdfium2", "onnxruntime"):
+    try:
+        BINARIES += collect_dynamic_libs(pkg)
     except Exception:
         pass
 
 a = Analysis(
     [ENTRY],
     pathex=[ROOT],
-    binaries=[],
+    binaries=BINARIES,
     datas=DATAS,
     hiddenimports=HIDDEN,
     hookspath=[],
@@ -105,7 +131,7 @@ if ONEFILE:
         a.binaries,
         a.datas,
         [],
-        name="txt2md",
+        name="AIeye",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -121,7 +147,7 @@ else:
         a.scripts,
         [],
         exclude_binaries=True,
-        name="txt2md",
+        name="AIeye",
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
@@ -136,5 +162,5 @@ else:
         a.datas,
         strip=False,
         upx=False,
-        name="txt2md",
+        name="AIeye",
     )

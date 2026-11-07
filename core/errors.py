@@ -28,7 +28,19 @@ class EngineMissing(ConvertError):
 
 
 class DependencyMissing(ConvertError):
-    """缺少 Python 包。可修复：提示 pip install 什么。"""
+    """缺少 Python 包。可修复：提示 pip install 什么。
+
+    注意 ``message`` 里必须带上原始异常：打包版缺失的是**包内的某个子模块或
+    二进制**，并不是「没装这个包」。只写「请 pip install xxx」会把用户引到
+    完全错误的方向上去（他已经装了，是打包漏了）。
+    """
+
+    @classmethod
+    def for_import(cls, exc: BaseException, what: str, package: str) -> "DependencyMissing":
+        detail = f"{type(exc).__name__}: {exc}"
+        return cls(f"{what}失败（{detail}）",
+                   hint=f"源码运行时执行 python -m pip install {package}；"
+                        f"若使用打包版，请反馈此信息")
 
 
 class UnsupportedFormat(ConvertError):

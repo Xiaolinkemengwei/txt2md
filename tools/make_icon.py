@@ -3,7 +3,9 @@
 用法：
     python tools/make_icon.py
 
-图标与应用内 IconTile 保持同一视觉语言：强调色渐变圆角方块 + 白色文档线条。
+图标与应用内 IconTile 保持同一视觉语言：强调色渐变圆角方块 + 白色「眼睛」。
+眼睛是 AI eye 的视觉母题，也对应 OCR 识别扫描件这项能力。
+几何比例与 gui/widgets.py 的 paint_eye() 保持一致，改一处要同步另一处。
 ICO 采用 PNG 压缩条目，Windows Vista 及以上原生支持。
 """
 
@@ -17,10 +19,38 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from PySide6.QtCore import QBuffer, QByteArray, QRectF, Qt  # noqa: E402
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QLinearGradient, QPainter, QPen  # noqa: E402
+from PySide6.QtCore import QBuffer, QByteArray, QPointF, QRectF, Qt  # noqa: E402
+from PySide6.QtGui import (QColor, QGuiApplication, QImage, QLinearGradient,  # noqa: E402
+                           QPainter, QPainterPath, QPen)
 
 SIZES = [16, 24, 32, 48, 64, 128, 256]
+
+
+def draw_eye(p: QPainter, box: QRectF, color: QColor, stroke: float):
+    """杏仁形眼睛：上下两段三次贝塞尔 + 实心瞳孔（与 gui/widgets.py 同比例）。"""
+    cx, cy = box.center().x(), box.center().y()
+    half_w = box.width() / 2.0
+    half_h = box.height() * 0.26
+
+    upper = QPainterPath(QPointF(cx - half_w, cy))
+    upper.cubicTo(QPointF(cx - half_w * 0.5, cy - half_h * 1.45),
+                  QPointF(cx + half_w * 0.5, cy - half_h * 1.45),
+                  QPointF(cx + half_w, cy))
+
+    lower = QPainterPath(QPointF(cx - half_w, cy))
+    lower.cubicTo(QPointF(cx - half_w * 0.5, cy + half_h * 1.45),
+                  QPointF(cx + half_w * 0.5, cy + half_h * 1.45),
+                  QPointF(cx + half_w, cy))
+
+    p.setBrush(Qt.NoBrush)
+    p.setPen(QPen(color, stroke, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(upper)
+    p.drawPath(lower)
+
+    r = box.height() * 0.135
+    p.setPen(Qt.NoPen)
+    p.setBrush(color)
+    p.drawEllipse(QPointF(cx, cy), r, r)
 
 
 def render(size: int) -> QImage:
@@ -31,9 +61,9 @@ def render(size: int) -> QImage:
     p.setRenderHint(QPainter.Antialiasing)
     p.setRenderHint(QPainter.SmoothPixmapTransform)
 
-    margin = size * 0.06
+    margin = size * 0.04
     rect = QRectF(margin, margin, size - 2 * margin, size - 2 * margin)
-    radius = size * 0.22
+    radius = size * 0.23
 
     grad = QLinearGradient(rect.topLeft(), rect.bottomRight())
     grad.setColorAt(0.0, QColor("#2B88D8"))
@@ -42,15 +72,9 @@ def render(size: int) -> QImage:
     p.setBrush(grad)
     p.drawRoundedRect(rect, radius, radius)
 
-    # 文档文本线条（按尺寸等比缩放，小图标减少线条数量）
-    pen_w = max(1.0, size * 0.075)
-    p.setPen(QPen(QColor("#FFFFFF"), pen_w, Qt.SolidLine, Qt.RoundCap))
-    left = size * 0.30
-    lines = [0.36, 0.50, 0.64] if size >= 32 else [0.40, 0.60]
-    widths = [0.42, 0.34, 0.22] if size >= 32 else [0.40, 0.26]
-    for y_ratio, w_ratio in zip(lines, widths):
-        y = size * y_ratio
-        p.drawLine(int(left), int(y), int(left + size * w_ratio), int(y))
+    # 小尺寸下瞳孔会更小、描边相对更粗，视觉上依然认得出是眼睛
+    eye = QRectF(size * 0.17, size * 0.34, size * 0.66, size * 0.32)
+    draw_eye(p, eye, QColor("#FFFFFF"), max(1.1, size * 0.058))
     p.end()
     return img
 

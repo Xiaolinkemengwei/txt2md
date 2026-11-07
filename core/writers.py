@@ -18,6 +18,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -36,7 +37,7 @@ _NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 def atomic_write(path: Path, data: bytes) -> None:
     """写临时文件再改名，避免中断留下损坏的半成品。"""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".txt2md-", suffix=".tmp")
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".aieye-", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
@@ -58,11 +59,15 @@ def _md_escape_cell(text: str) -> str:
     return text.replace("\\", "\\\\").replace("|", "\\|").replace("\n", "<br>")
 
 
-def render_markdown(doc: TextDoc, *, atx: bool = True) -> str:
+def render_markdown(doc: TextDoc, *, atx: bool = True,
+                    assets_prefix: str = "", with_images: bool = True) -> str:
     """块模型 → GFM 文本。
 
     块之间用空行分隔，但**嵌套列表除外**：模型把嵌套层拆成了独立块，
     若在中间补空行，GFM 会把它判为 loose list，改变列表语义。
+
+    ``assets_prefix`` 是图片目录相对目标文件的路径（如 ``报告_assets``），
+    由 write_any 在落盘素材后传入。
     """
     out: list[str] = []
     prev: Block | None = None
@@ -133,6 +138,16 @@ def render_markdown(doc: TextDoc, *, atx: bool = True) -> str:
             out.append("| " + " | ".join(sep) + " |")
             for r in body:
                 out.append(cell_line(r))
+        elif b.kind == "image":
+            ref = b.image
+            if ref is None or not with_images:
+                continue
+            src = f"{assets_prefix}/{ref.name}" if assets_prefix else ref.name
+            # alt 承载题注：Markdown 是源格式，图本身可见，再补一行斜体题注
+            # 会让一本书几百张图的地方重复一遍同样的文字。题注在 HTML/docx
+            # 输出里会显式渲染成题注。
+            alt = (ref.caption() or "插图").replace("]", "）").replace("[", "（")
+            out.append(f"![{alt}]({src})")
         prev = b
     text = "\n".join(out)
     return ensure_single_trailing_newline(text)
@@ -208,8 +223,7 @@ def write_xlsx(doc: Document, path: Path, *, numeric: bool = True) -> None:
         from openpyxl.styles import Alignment, Font, PatternFill
         from openpyxl.utils import get_column_letter
     except ImportError as exc:
-        raise DependencyMissing("写出 xlsx 需要 openpyxl",
-                                hint="python -m pip install openpyxl") from exc
+        raise DependencyMissing.for_import(exc, "写出 xlsx", "openpyxl") from exc
 
     book = doc.as_book()
     wb = openpyxl.Workbook()
@@ -266,7 +280,7 @@ _FALLBACK_TABLE_STYLE = "Table Grid"
 
 
 def write_docx(doc: Document, path: Path, *, latin_font: str = "Segoe UI",
-               east_asia: str = "Microsoft YaHei") -> None:
+               east_asia: str = "Microsoft YaHei", images: bool = True) -> None:
     try:
         import docx
         from docx.enum.table import WD_TABLE_ALIGNMENT
@@ -275,8 +289,7 @@ def write_docx(doc: Document, path: Path, *, latin_font: str = "Segoe UI",
         from docx.oxml.ns import qn
         from docx.shared import Pt, RGBColor
     except ImportError as exc:
-        raise DependencyMissing("写出 docx 需要 python-docx",
-                                hint="python -m pip install python-docx") from exc
+        raise DependencyMissing.for_import(exc, "写出 docx", "python-docx") from exc
 
     d = docx.Document()
 
@@ -417,6 +430,29 @@ def write_docx(doc: Document, path: Path, *, latin_font: str = "Segoe UI",
                     par.paragraph_format.line_spacing = 1.15
                     add_runs(par, str(val), bold=(b.header and r_i == 0))
             d.add_paragraph()
+        elif b.kind == "image":
+            ref = b.image
+            if ref is None:
+                continue
+            if not images or not Path(ref.path).exists():
+                # 不能因为一张图读不到就让整篇 docx 失败——版式文档里保住
+                # 文字和其余图片，比整体报错有用得多。
+                d.add_paragraph(f"【图】{ref.caption() or ref.name}")
+                continue
+            try:
+                from docx.shared import Cm
+                p = d.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p.add_run().add_picture(str(ref.path), width=Cm(15))
+                if ref.caption():
+                    cap = d.add_paragraph()
+                    cap.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    run = cap.add_run(ref.caption())
+                    run.italic = True
+                    run.font.size = Pt(9)
+                    run.font.color.rgb = RGBColor(0x59, 0x59, 0x59)
+            except Exception:
+                d.add_paragraph(f"【图】{ref.caption() or ref.name}")
 
     buf = io.BytesIO()
     d.save(buf)
@@ -434,7 +470,7 @@ def _pdf_looks_valid(path: Path) -> bool:
 
 
 def html_to_pdf(html_text: str, out_path: Path, *, title: str = "",
-                timeout: int = 90) -> str:
+                timeout: int = 90, extra_files: dict[str, Path] | None = None) -> str:
     """用无头浏览器把 HTML 打印成 PDF，返回所用引擎名。
 
     为什么不用 reportlab/fpdf2：它们需要手工嵌入中文字体且不处理分页断行，
@@ -447,10 +483,20 @@ def html_to_pdf(html_text: str, out_path: Path, *, title: str = "",
             hint="安装 Microsoft Edge 或 Google Chrome 后重试")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="txt2md-pdf-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="aieye-pdf-") as tmp:
         tmpdir = Path(tmp)
         html_file = tmpdir / "print.html"
         html_file.write_text(html_text, encoding="utf-8")
+
+        # 插图随 HTML 一起放到临时目录：打印时浏览器只需读相对路径，
+        # 不必依赖目标目录里是否已经落盘了图片。
+        for rel, src in (extra_files or {}).items():
+            dst = tmpdir / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copyfile(src, dst)
+            except OSError:
+                continue
 
         # 用临时输出名，成功后再原子替换，避免失败留下 0 字节 PDF
         staged = tmpdir / "out.pdf"
@@ -490,26 +536,74 @@ def html_to_pdf(html_text: str, out_path: Path, *, title: str = "",
         return f"{engines.browser_name} 打印"
 
 
-def write_pdf(doc: Document, path: Path, *, title: str = "") -> str:
+def write_pdf(doc: Document, path: Path, *, title: str = "",
+              images: bool = True) -> str:
     """Document → PDF。走 HTML 中转 + 浏览器打印。"""
     text_doc = doc.as_text()
-    html_text = render_html(text_doc, title=title or doc.name)
-    return html_to_pdf(html_text, path, title=title or doc.name)
+    extra: dict[str, Path] = {}
+    if images:
+        for ref in doc.assets:
+            if Path(ref.path).exists():
+                extra[f"__assets__/{ref.name}"] = Path(ref.path)
+    prefix = "__assets__" if extra else ""
+    html_text = render_html(text_doc, title=title or doc.name, assets_prefix=prefix)
+    return html_to_pdf(html_text, path, title=title or doc.name, extra_files=extra)
+
+
+def _materialize_assets(doc: Document, path: Path,
+                        assets_dir: str | Path | None) -> str:
+    """把图片复制到目标文件旁的素材目录，返回 md/html 里使用的相对前缀。
+
+    默认目录名是 ``<目标名>_assets``：和 md 放同一层，用户压缩、拷贝、上传
+    时不会漏掉图；外部编辑器（Typora、VS Code）也能直接显示。
+    """
+    if not doc.assets:
+        return ""
+
+    target = Path(assets_dir) if assets_dir else path.parent / f"{path.stem}_assets"
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise SourceError(f"无法创建图片目录 {target}：{exc}") from exc
+
+    for ref in doc.assets:
+        src = Path(ref.path)
+        if not src.exists():
+            continue
+        try:
+            shutil.copyfile(src, target / ref.name)
+        except OSError as exc:
+            raise SourceError(f"无法保存图片 {ref.name}：{exc}") from exc
+
+    try:
+        prefix = os.path.relpath(target, path.parent)
+    except ValueError:                       # 跨盘符时 relpath 会失败
+        return target.resolve().as_uri()
+    return prefix.replace("\\", "/")
 
 
 # ---------------------------------------------------------------- 分派
 def write_any(doc: Document, path: Path, dst_format: str, **opts) -> str:
     """把 Document 写成指定格式，返回所用引擎说明。"""
     fmt = dst_format
+    images = opts.pop("images", True)
+    assets_dir = opts.pop("assets_dir", None)
 
     if fmt == "txt":
         atomic_write_text(path, render_text(doc))
         return "内置"
-    if fmt == "md":
-        atomic_write_text(path, render_markdown(doc.as_text()))
-        return "内置"
-    if fmt == "html":
-        atomic_write_text(path, render_html(doc.as_text(), title=doc.name))
+    if fmt in ("md", "html"):
+        # md / html 的图必须落盘为独立文件：Markdown 没有「内嵌图片」这回事，
+        # HTML 内联成 data URI 会让几百张图的文件大到编辑器打不开。
+        prefix = _materialize_assets(doc, path, assets_dir) if images else ""
+        if fmt == "md":
+            atomic_write_text(path, render_markdown(doc.as_text(),
+                                                    assets_prefix=prefix,
+                                                    with_images=images))
+        else:
+            atomic_write_text(path, render_html(doc.as_text(), title=doc.name,
+                                                assets_prefix=prefix,
+                                                with_images=images))
         return "内置"
     if fmt == "csv":
         delimiter = opts.pop("delimiter", ",")
@@ -519,9 +613,9 @@ def write_any(doc: Document, path: Path, dst_format: str, **opts) -> str:
         write_xlsx(doc, path, numeric=opts.pop("numeric", True))
         return "openpyxl"
     if fmt == "docx":
-        write_docx(doc, path, **opts)
+        write_docx(doc, path, images=images, **opts)
         return "python-docx"
     if fmt == "pdf":
-        return write_pdf(doc, path, title=doc.name)
+        return write_pdf(doc, path, title=doc.name, images=images)
 
     raise SourceError(f"暂不支持写出 {fmt}")

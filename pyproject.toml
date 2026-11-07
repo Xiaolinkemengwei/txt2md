@@ -3,18 +3,18 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "txt2md"
-version = "2.0.0"
-description = "文档格式互转工具：txt / md / html / csv / xlsx / docx / pdf 双向转换，支持中文编码自动识别与 Fluent Design 桌面界面"
+name = "aieye"
+version = "2.2.0"
+description = "AI eye：一眼看懂、一键转好的文档格式互转工具。txt / md / html / csv / xlsx / docx / pdf 双向转换，支持中文编码自动识别、扫描件 OCR 与 Fluent Design 桌面界面"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
-authors = [{ name = "txt2md contributors" }]
+authors = [{ name = "AI eye contributors" }]
 keywords = [
-    "markdown", "txt", "docx", "xlsx", "pdf", "converter",
+    "aieye", "markdown", "txt", "docx", "xlsx", "pdf", "converter",
     "document-conversion", "batch", "chinese", "gbk", "windows",
-    "fluent", "pyside6",
+    "ocr", "fluent", "pyside6",
 ]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -37,14 +37,20 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6-Essentials>=6.6"]
+# 扫描件 OCR：模型随包分发、离线运行；headless 版 OpenCV 避免与 PySide6 的 Qt 冲突
+ocr = ["rapidocr-onnxruntime>=1.2", "opencv-python-headless>=4.8"]
 # 兜底引擎：体积较大（内含 pandoc 二进制约 231MB），按需启用
 pandoc = ["pypandoc-binary>=1.13"]
 dev = [
     "PySide6-Essentials>=6.6",
     "pyinstaller>=6.0",
     "pypandoc-binary>=1.13",
+    "rapidocr-onnxruntime>=1.2",
+    "opencv-python-headless>=4.8",
 ]
 
+# 仓库地址沿用原路径：GitHub 上的仓库还没改名，写成 /aieye 会 404。
+# 仓库改名后把下面四处一起换掉即可。
 [project.urls]
 Homepage = "https://github.com/Xiaolinkemengwei/txt2md"
 Repository = "https://github.com/Xiaolinkemengwei/txt2md"
@@ -52,10 +58,12 @@ Issues = "https://github.com/Xiaolinkemengwei/txt2md/issues"
 Changelog = "https://github.com/Xiaolinkemengwei/txt2md/blob/main/CHANGELOG.md"
 
 [project.scripts]
-txt2md = "txt2md:main"
+aieye = "aieye:main"
+# 兼容 1.0 / 2.0 已经写进脚本的旧命令名
+txt2md = "aieye:main"
 
 [tool.setuptools]
-py-modules = ["txt2md"]
+py-modules = ["aieye"]
 
 [tool.setuptools.packages.find]
 include = ["core*", "gui*"]

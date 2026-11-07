@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Iterable, Literal
 
 # 块类型：决定写出时用什么语法
@@ -34,11 +35,33 @@ BlockKind = Literal[
     "quote",      # 引用块
     "table",      # 表格，rows 二维
     "divider",    # 分隔线
+    "image",      # 插图，image 存引用（扫描件的图表还原）
     "raw",        # 未解析原文，逐字保留
 ]
 
 # 模型种类
 DocKind = Literal["text", "table"]   # table 类走 Workbook 载荷
+
+
+@dataclass
+class ImageRef:
+    """一张待落盘的图片。
+
+    为什么放临时文件而不是内存字节：整本扫描书可能有几百张图，全驻留内存
+    会让几百页的任务吃掉上 GB。裁切时落到临时目录，写出去时再按目标格式
+    复制或嵌入，pipeline 在 finally 里统一清理。
+
+    name 是**目标目录内**的文件名（p041_fig1.png），path 是临时文件位置。
+    """
+
+    name: str
+    path: Path
+    alt: str = ""          # 图注，作为 md 的 alt 文本
+    width: int = 0         # 像素宽高，写出 docx 时用来限宽
+    height: int = 0
+
+    def caption(self) -> str:
+        return self.alt.strip()
 
 
 @dataclass
@@ -67,9 +90,14 @@ class Block:
     # code 专用
     lang: str = ""
 
+    # image 专用（扫描件的图表/照片）
+    image: ImageRef | None = None
+
     def is_empty(self) -> bool:
         if self.kind in ("list", "table"):
             return not (self.items or self.rows)
+        if self.kind == "image":
+            return self.image is None
         return not self.text.strip()
 
     # -- 便捷构造 -------------------------------------------------
@@ -90,6 +118,10 @@ class Block:
     @staticmethod
     def table(rows: list[list[str]], header: bool = True) -> "Block":
         return Block(kind="table", rows=rows, header=header)
+
+    @staticmethod
+    def figure(image: ImageRef) -> "Block":
+        return Block(kind="image", image=image, text=image.caption())
 
 
 @dataclass
@@ -144,6 +176,11 @@ class TextDoc:
                 for row in b.rows:
                     out.append("\t".join(row))
                 out.append("")
+            elif b.kind == "image":
+                # 纯文本里图片无法呈现，留一行占位保住题注——用户至少知道
+                # 「这里原本有张图，叫什么」，比直接丢掉强。
+                cap = b.image.caption() if b.image else ""
+                out.append(f"【图】{cap}" if cap else "【图】")
         return "\n".join(out)
 
 
@@ -175,11 +212,13 @@ class Workbook:
 
 # ---------------------------------------------------------------- 结构表
 # 把文本块落成工作表时用的专用表名。以下划线开头，暗示它是内部结构表。
-PROSE_SHEET = "_txt2md_body"
+PROSE_SHEET = "_aieye_body"
+# 旧版本用过的表名（改名后仍要能读回自己生成过的文件）
+LEGACY_PROSE_SHEETS = ("_txt2md_body",)
 PROSE_HEADER = ("类型", "层级", "内容")
 # 认识的结构表类型（用于反向识别校验，避免误判用户自己的表格）
 PROSE_KINDS = {"heading", "paragraph", "list", "list-ordered", "code",
-               "quote", "divider", "raw", "table"}
+               "quote", "divider", "raw", "table", "image"}
 
 
 def _prose_sheet(doc: TextDoc, table_blocks: list[Block]) -> Sheet:
@@ -262,8 +301,12 @@ def prose_sheet_to_doc(sheet: Sheet, book: Workbook) -> TextDoc:
 
 
 def looks_like_prose_sheet(sheet: Sheet) -> bool:
-    """判断某工作表是否为结构表：表名 + 表头 + 首列取值三重校验。"""
-    if sheet.name != PROSE_SHEET or not sheet.rows:
+    """判断某工作表是否为结构表：表名 + 表头 + 首列取值三重校验。
+
+    表名同时接受旧版 ``_txt2md_body``：2.0 生成的 xlsx 里写的是这个名字，
+    改名后如果不认，那些文件再转回 Markdown 时正文会被当成普通表格。
+    """
+    if sheet.name not in (PROSE_SHEET, *LEGACY_PROSE_SHEETS) or not sheet.rows:
         return False
     head = [str(c).strip() for c in sheet.rows[0][:3]]
     if tuple(head) != PROSE_HEADER:
@@ -293,6 +336,10 @@ class Document:
     source_format: str = ""
     source_encoding: str = ""
     source_title: str = ""
+
+    # 待落盘的图片（扫描件的插图）。写出器负责复制到目标目录或嵌入文档，
+    # 临时文件由 pipeline 在任务结束时统一清理。
+    assets: list[ImageRef] = field(default_factory=list)
 
     # 读取过程中的非致命问题（如"第 3 张表为空，已跳过"）
     warnings: list[str] = field(default_factory=list)

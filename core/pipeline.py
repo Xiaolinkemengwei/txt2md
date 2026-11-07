@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +60,9 @@ class Result:
     engine: str = ""       # 实际使用的引擎
     warnings: list[str] = field(default_factory=list)
     seconds: float = 0.0
+    # 生成内容的 Markdown 表示，供界面「查看结果 / 复制」用。不落盘、不进产物，
+    # 任何目标格式都能预览——docx/pdf 的产物本身没法直接读成文本。
+    preview: str = ""
 
     @property
     def ok(self) -> bool:
@@ -227,17 +231,40 @@ def precheck(jobs: list[Job], *, force: bool = False) -> tuple[list[Job], list[J
 
 
 # ---------------------------------------------------------------- 执行
-def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result:
-    """执行单个转换任务。所有异常都转成 Result，不向上抛。"""
-    start = time.perf_counter()
-    reason = check(job, force=force)
-    if reason:
-        # 区分「跳过」与「失败」：目标已存在属于正常的跳过
-        status = "skipped" if reason.startswith("目标文件已存在") else "error"
-        return Result(status=status, src=str(job.src), dst=str(job.dst), reason=reason)
+# 预览文本上限：整本扫描书的 Markdown 可能几十 MB，全塞进内存只为看几行
+# 正文不值得。2MB 足够显示几万字，超出部分用户去开产物文件。
+PREVIEW_LIMIT = 2_000_000
 
+
+def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result:
+    """执行单个转换任务。所有异常都转成 Result，不向上抛。
+
+    插图会先落在私有临时目录（几百张图不适合常驻内存），任务结束无论成败
+    都清掉——md/html 需要的图在这一步已经被复制到目标目录了。
+    """
+    import shutil
+    start = time.perf_counter()
     opts = dict(job.options)
+    asset_root = Path(tempfile.mkdtemp(prefix="aieye-assets-"))
     try:
+        return _convert_one_inner(job, force=force, verify=verify, opts=opts,
+                                  asset_root=asset_root, start=start)
+    finally:
+        shutil.rmtree(asset_root, ignore_errors=True)
+
+
+def _convert_one_inner(job: Job, *, force: bool, verify: bool, opts: dict,
+                       asset_root: Path, start: float) -> Result:
+    try:
+        # 预检必须在 try 内：check() 里要碰文件系统（stat / exists / 目录可写性
+        # 探测），网络盘掉线、路径含非法字符、权限被回收都会在这里抛 OSError。
+        # 放在 try 外面，异常会穿出 convert_one，批量任务和界面线程一起被拖死。
+        reason = check(job, force=force)
+        if reason:
+            # 区分「跳过」与「失败」：目标已存在属于正常的跳过
+            status = "skipped" if reason.startswith("目标文件已存在") else "error"
+            return Result(status=status, src=str(job.src), dst=str(job.dst), reason=reason)
+
         # ---- 同格式：只复制，不重组 ----------------------------
         # 用户选错目标格式时，最坏的结果不该是「内容被重新排版了一遍」。
         # 逐字节复制能保证这种情况下数据零损失。
@@ -275,9 +302,11 @@ def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result
             warnings = [job.options["_encoding_warning"]] if "_encoding_warning" in job.options else []
             return Result(status="ok", src=str(job.src), dst=str(job.dst),
                           engine="内置", warnings=warnings,
+                          preview=md[:PREVIEW_LIMIT],
                           seconds=time.perf_counter() - start)
 
-        doc = read_any(job.src, job.src_format, **_reader_opts(opts))
+        doc = read_any(job.src, job.src_format,
+                       **_reader_opts(opts, asset_root))
         if doc.is_empty():
             raise SourceError("源文件没有可转换的内容")
 
@@ -289,13 +318,14 @@ def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result
 
         return Result(status="ok", src=str(job.src), dst=str(job.dst),
                       engine=engine, warnings=warnings,
+                      preview=_preview_of(doc),
                       seconds=time.perf_counter() - start)
 
     except ConvertError as exc:
-        # 兜底不能凌驾于防呆之上：源文件是二进制/空文件时，pandoc 会把它当文本
-        # 读成乱码而不是报错，那就等于绕过校验产出垃圾。这类错误直接失败。
+        # 兜底不能凌驾于防呆之上：源文件是二进制/空文件/扫描件时，pandoc 会把它
+        # 当文本读成乱码而不是报错，那就等于绕过校验产出垃圾。这类错误直接失败。
         blocked = isinstance(exc, SourceError) and any(
-            m in exc.message for m in ("二进制", "空文件", "0 字节", "没有可"))
+            m in exc.message for m in ("二进制", "空文件", "0 字节", "没有可", "扫描版"))
         alt = None if blocked else _try_pandoc(job)
         if alt:
             return Result(status="ok", src=str(job.src), dst=str(job.dst),
@@ -335,14 +365,32 @@ def _try_pandoc(job: Job) -> str | None:
         return None
 
 
-def _reader_opts(opts: dict) -> dict:
-    keys = {"start_heading", "verbatim", "encoding", "delimiter", "has_header", "sheets"}
-    return {k: v for k, v in opts.items() if k in keys}
+def _reader_opts(opts: dict, assets_dir: Path | None = None) -> dict:
+    keys = {"start_heading", "verbatim", "encoding", "delimiter", "has_header",
+            "sheets", "ocr", "images", "layout"}
+    out = {k: v for k, v in opts.items() if k in keys}
+    # 只有要图时才给目录：不产图的任务不该多建一个空目录
+    if assets_dir is not None and out.get("images", True):
+        out["assets_dir"] = assets_dir
+    return out
 
 
 def _writer_opts(opts: dict) -> dict:
-    keys = {"delimiter", "numeric"}
+    keys = {"delimiter", "numeric", "images"}
     return {k: v for k, v in opts.items() if k in keys}
+
+
+def _preview_of(doc) -> str:
+    """把结果渲染成 Markdown 供界面预览。
+
+    为什么不用产物文件：docx/pdf/xlsx 都是二进制，界面读不出文字；用模型
+    渲染一次，任何目标格式都有可复制的内容。这里不写图片目录，路径是图片名。
+    """
+    try:
+        from .writers import render_markdown
+        return render_markdown(doc.as_text())[:PREVIEW_LIMIT]
+    except Exception:
+        return ""
 
 
 # ---------------------------------------------------------------- 产物校验

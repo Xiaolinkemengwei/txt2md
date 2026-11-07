@@ -20,7 +20,10 @@ from .mdparse import strip_inline
 from .model import Block, TextDoc
 
 _HEADINGS = {f"h{i}": i for i in range(1, 7)}
-_SKIP_TAGS = {"script", "style", "head", "meta", "link", "noscript", "template"}
+# 只放「有结束标签的容器」：跳过深度靠 start/end 配对加减，把 meta、link
+# 这类自闭合标签放进来会让深度只增不减——</head> 只抵消一层，剩下的深度
+# 会把整个 <body> 吞掉，表现就是「任何标准网页都读不出正文」。
+_SKIP_TAGS = {"script", "style", "head", "noscript", "template"}
 _BLOCK_TAGS = {"p", "div", "section", "article", "header", "footer", "main",
                "aside", "figure", "figcaption", "dd", "dt", "pre", "blockquote",
                "table", "ul", "ol", "li", "hr", "br", "tr"}
@@ -288,7 +291,8 @@ def _inline_md(text: str) -> str:
     return out.replace("\n", "<br>")
 
 
-def render_html(doc: TextDoc, title: str = "", *, standalone: bool = True) -> str:
+def render_html(doc: TextDoc, title: str = "", *, standalone: bool = True,
+                assets_prefix: str = "", with_images: bool = True) -> str:
     """块模型 → HTML。``standalone=False`` 只产出 body 片段（嵌入用）。"""
     parts: list[str] = []
     for b in doc.blocks:
@@ -331,6 +335,14 @@ def render_html(doc: TextDoc, title: str = "", *, standalone: bool = True) -> st
                 "<tr>" + "".join(cell("td", c, i) for i, c in enumerate(r)) + "</tr>"
                 for r in body_rows)
             parts.append(f"<table>{head}<tbody>{body}</tbody></table>")
+        elif b.kind == "image":
+            ref = b.image
+            if ref is None or not with_images:
+                continue
+            src = f"{assets_prefix}/{ref.name}" if assets_prefix else ref.name
+            cap = _esc(ref.caption())
+            fig_cap = f"<figcaption>{cap}</figcaption>" if cap else ""
+            parts.append(f'<figure><img src="{_esc(src)}" alt="{cap}">{fig_cap}</figure>')
 
     content = "\n".join(parts)
     if not standalone:
@@ -367,6 +379,10 @@ def render_plain(doc: TextDoc, *, keep_blank: bool = False) -> str:
         elif b.kind == "table":
             for r in b.rows:
                 out.append("\t".join(strip_inline(c) for c in r))
+        elif b.kind == "image":
+            # 纯文本留占位；图注本身是有用信息（"图 2-13 上升旗形图例"）
+            cap = b.image.caption() if b.image else ""
+            out.append(f"【图】{cap}" if cap else "【图】")
         out.append("")
     text = "\n".join(out)
     if not keep_blank:

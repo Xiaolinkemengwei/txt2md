@@ -22,6 +22,8 @@ Fidelity = str  # ● 结构保真 / ◐ 内容保真 / ○ 纯文本近似
 
 # ---------------------------------------------------------------- 格式定义
 FormatKind = Literal["text", "table", "layout"]
+# 转换方向：source 只能读、sink 只能写、both 双向
+FormatRole = Literal["source", "sink", "both"]
 
 
 @dataclass(frozen=True)
@@ -31,9 +33,20 @@ class Format:
     extensions: tuple[str, ...]
     kind: FormatKind          # 决定读入后落到哪个模型
     binary: bool = False      # 是否为二进制格式（决定能否逐字保真）
+    # 方向：图片只能作为输入（OCR 识别），不能作为输出目标。
+    # 写死一个「图片」输出格式没有意义——没有任何转换是「生成一张图」。
+    role: FormatRole = "both"
 
     def __str__(self) -> str:
         return self.code
+
+    @property
+    def can_read(self) -> bool:
+        return self.role in ("source", "both")
+
+    @property
+    def can_write(self) -> bool:
+        return self.role in ("sink", "both")
 
 
 FORMATS: dict[str, Format] = {
@@ -44,6 +57,10 @@ FORMATS: dict[str, Format] = {
     "xlsx": Format("xlsx", "Excel 工作簿", (".xlsx", ".xlsm"), "table", binary=True),
     "docx": Format("docx", "Word 文档", (".docx",), "layout", binary=True),
     "pdf": Format("pdf", "PDF", (".pdf",), "layout", binary=True),
+    # 图片走 OCR 读成文本；6 种常见位图格式，PDF 里的扫描页也走同一条链
+    "image": Format("image", "图片（OCR）",
+                    (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"),
+                    "text", binary=True, role="source"),
 }
 
 # 别名：CLI 里允许写 xls / word / excel 之类的口语
@@ -194,6 +211,31 @@ def detect_engines(refresh: bool = False) -> Engines:
     return e
 
 
+# ---------------------------------------------------------------- 依赖探测
+_IMPORTABLE: dict[str, bool] = {}
+
+
+def _importable(module: str) -> bool:
+    """真实 import 一次并缓存。
+
+    为什么不用 ``importlib.util.find_spec``：打包版最常见的问题是「模块清单里
+    有，但它依赖的二进制或子模块没进去」，此时 find_spec 照样返回 True，只有
+    真正 import 才暴露。这直接决定 GUI 会不会「显示可选、点了才失败」。
+    """
+    if module in _IMPORTABLE:
+        return _IMPORTABLE[module]
+    try:
+        import importlib
+        if importlib.util.find_spec(module) is None:
+            _IMPORTABLE[module] = False
+            return False
+        importlib.import_module(module)
+        _IMPORTABLE[module] = True
+    except Exception:
+        _IMPORTABLE[module] = False
+    return _IMPORTABLE[module]
+
+
 # ---------------------------------------------------------------- 能力矩阵
 @dataclass
 class Capability:
@@ -207,7 +249,7 @@ class Capability:
 
 
 def capability(fmt: str, engines: Engines | None = None) -> Capability:
-    """返回某格式在当前环境下的读写能力。"""
+    """返回某格式在当前环境下的读写能力（依赖可导入性会真实检测）。"""
     e = engines or detect_engines()
 
     if fmt in ("txt", "md", "html"):
@@ -216,22 +258,56 @@ def capability(fmt: str, engines: Engines | None = None) -> Capability:
     if fmt == "csv":
         return Capability(True, True, "内置", "内置", "●", "●")
     if fmt == "xlsx":
-        return Capability(True, True, "openpyxl", "openpyxl", "●", "●")
+        ok = _importable("openpyxl")
+        return Capability(ok, ok, "openpyxl" if ok else "", "openpyxl" if ok else "",
+                          "●" if ok else "○", "●" if ok else "○",
+                          note="" if ok else "缺少 openpyxl（Excel 读写组件）")
     if fmt == "docx":
+        ok = _importable("docx")
         # docx 内置往返保结构；复杂版式（页眉页脚、脚注）会降级
-        return Capability(True, True, "python-docx", "python-docx", "◐", "◐",
-                          note="复杂版式（分栏、页眉页脚、脚注）不保留")
+        return Capability(ok, ok, "python-docx" if ok else "", "python-docx" if ok else "",
+                          "◐" if ok else "○", "◐" if ok else "○",
+                          note=("复杂版式（分栏、页眉页脚、脚注）不保留" if ok
+                                else "缺少 python-docx（Word 读写组件）"))
     if fmt == "pdf":
+        can_read = _importable("pdfplumber")
+        can_write = bool(e.browser or e.pandoc)
         return Capability(
-            can_read=True,
-            can_write=bool(e.browser or e.pandoc),
-            engine_read="pdfplumber",
-            engine_write=(f"{e.browser_name} 打印" if e.browser else "pandoc+LaTeX" if e.pandoc else ""),
-            fidelity_read="○",
+            can_read=can_read,
+            can_write=can_write,
+            engine_read="pdfplumber" if can_read else "",
+            engine_write=(f"{e.browser_name} 打印" if e.browser
+                          else "pandoc+LaTeX" if e.pandoc else ""),
+            fidelity_read="○" if can_read else "○",
             fidelity_write="◐" if e.browser else "○",
-            note="PDF 无文档结构，只能取文本层重排",
+            note=("PDF 无文档结构，只能取文本层重排；扫描件可勾选 OCR（较慢）"
+                  if can_read and can_write
+                  else "缺少 PDF 解析组件（pdfplumber），无法读取 PDF" if not can_read
+                  else "缺少打印引擎（Edge/Chrome），无法生成 PDF"),
+        )
+    if fmt == "image":
+        # 图片只有一条路：OCR 读成文本。写不出图片，因此 can_write 恒为 False。
+        ok = _importable("rapidocr_onnxruntime")
+        return Capability(
+            can_read=ok, can_write=False,
+            engine_read="RapidOCR" if ok else "",
+            fidelity_read="○" if ok else "○",
+            note=("图片经 OCR 识别为文字，不保留原版式" if ok
+                  else "缺少 OCR 组件（rapidocr-onnxruntime），无法识别图片"),
         )
     return Capability(False, False, note="未支持的格式")
+
+
+def validate_target(fmt: str) -> str:
+    """校验某格式能否作为输出目标；不能则返回原因（空串表示可以）。"""
+    f = FORMATS.get(fmt)
+    if f is None:
+        return f"未知的输出格式：{fmt}"
+    if not f.can_write:
+            writable = "、".join(k for k, v in FORMATS.items() if v.can_write)
+            return (f"{f.label}只能作为输入（通过 OCR 识别），不能作为输出格式。"
+                    f"可选目标：{writable}")
+    return ""
 
 
 def matrix(engines: Engines | None = None) -> dict[str, dict[str, str]]:
@@ -243,8 +319,9 @@ def matrix(engines: Engines | None = None) -> dict[str, dict[str, str]]:
         cs = capability(src, e)
         for dst in FORMATS:
             cd = capability(dst, e)
+            # 自身对自身的「·」只在双向格式上成立：图片不能转成图片
             if src == dst:
-                row[dst] = "·"
+                row[dst] = "·" if (cs.can_read and cs.can_write) else ""
             elif not (cs.can_read and cd.can_write):
                 row[dst] = ""
             else:
