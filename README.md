@@ -254,6 +254,7 @@ python tools/build.py           # 打包
 ## 更多文档
 
 - [项目介绍（完整版）](docs/项目介绍.md)
+- [2.2 发布说明](docs/RELEASE_NOTES_v2.2.0.md) · [图表还原与图片识别方案](docs/2.2-方案-图表还原与图片识别.md)
 - [2.1 发布说明](docs/RELEASE_NOTES_v2.1.0.md)
 - [2.0 设计与实现大纲](docs/2.0-设计与实现大纲.md)
 - [2.0 开源方案调研](research/2026-11-07-2.0-多格式互转调研.md)
