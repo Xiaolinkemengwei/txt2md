@@ -128,8 +128,9 @@ txt2md/
 ├─ txt2md.py              # 转换核心 + 命令行（零第三方依赖）
 ├─ gui/                   # Fluent 界面层（theme / widgets / app）
 ├─ assets/icon.ico        # 多尺寸图标
-├─ tools/                 # build.py 一键构建、make_icon.py 生成图标
+├─ tools/                 # build.py 一键构建、make_icon.py 图标、enable_ci.py
 ├─ tests/                 # 样例、界面层测试、多尺寸截图
+├─ ci/                    # GitHub Actions 工作流（启用方式见 ci/README.md）
 ├─ docs/项目介绍.md        # 完整项目文档
 ├─ txt2md.spec            # PyInstaller 配置
 └─ pyproject.toml         # 包元数据
@@ -143,7 +144,7 @@ python tools/build.py --clean
 ```
 
 产物在 `dist/`：`txt2md.exe`（单文件 GUI，35.8 MB）、`txt2md-1.0.0-win64.zip`、
-`txt2md-1.0.0-py3-none-any.whl`、`txt2md-1.0.0.tar.gz`。
+`txt2md-1.0.0-py3-none-any.whl`、`txt2md-1.0.0.tar.gz`，并自动生成 `SHA256SUMS.txt`。
 `--onedir` 可产出启动更快的目录版；版本号唯一来源是 `txt2md.py` 的 `__version__`。
 
 ## 文档
@@ -161,6 +162,15 @@ python txt2md.py tests/sample -o tests/out --overwrite   # 命令行回归
 python tests/test_gui_flow.py                            # 界面层功能测试
 python tests/shot_gui.py                                 # 多尺寸视觉回归
 ```
+
+CI 工作流定义在 `ci/` 目录。首次启用需给 GitHub token 勾选 `workflow` 权限，然后：
+
+```bash
+python tools/enable_ci.py && git push origin main
+```
+
+启用后：`ci.yml` 在每次 push/PR 上跑三个 Python 版本的校验与截图；`release.yml`
+在推送 `v*` 标签时自动构建并创建 Release。
 
 ## 已知限制
 
