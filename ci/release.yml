@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller build wheel
+
+      - name: 回归测试
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QPA_FONTDIR: C:\Windows\Fonts
+        run: |
+          python txt2md.py --version
+          python txt2md.py tests/sample -o tests/out --overwrite
+          python tests/test_gui_flow.py
+
+      - name: 构建全部产物
+        run: |
+          python tools/build.py --clean --no-wheel
+          python -m build --no-isolation --sdist --wheel -o dist
+          python -c "import sys; sys.path.insert(0,'tools'); import build; build.step_checksums()"
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: txt2md ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/txt2md.exe
+            dist/*.zip
+            dist/*.whl
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt

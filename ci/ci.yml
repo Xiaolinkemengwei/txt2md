@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test on Windows / Python ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: 命令行零依赖校验（不安装任何第三方包）
+        shell: pwsh
+        run: |
+          python txt2md.py --version
+          python txt2md.py tests/sample -o tests/out --overwrite
+          if (Test-Path tests/out/gbk_note.md) { Get-Content tests/out/gbk_note.md }
+
+      - name: 安装界面依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: 界面层功能测试（离屏）
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QPA_FONTDIR: C:\Windows\Fonts
+        run: python tests/test_gui_flow.py
+
+      - name: 视觉回归截图
+        env:
+          QT_QPA_PLATFORM: offscreen
+          QT_QPA_FONTDIR: C:\Windows\Fonts
+        run: python tests/shot_gui.py
+
+      - name: 上传截图
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-py${{ matrix.python }}
+          path: tests/preview/*.png
+          if-no-files-found: warn
+
+  build:
+    name: Build distributables
+    runs-on: windows-latest
+    needs: test
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 安装构建依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller build wheel
+
+      - name: 构建 exe / wheel / 发布包
+        run: python tools/build.py --clean --no-wheel
+
+      - name: 构建 Python 分发包
+        run: python -m build --no-isolation --sdist --wheel -o dist
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: txt2md-win64
+          path: |
+            dist/txt2md.exe
+            dist/*.zip
+            dist/*.whl
+            dist/*.tar.gz

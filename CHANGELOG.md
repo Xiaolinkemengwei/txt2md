@@ -28,7 +28,8 @@
 - **发布工程**：`txt2md.spec`（PyInstaller，单文件/目录两种模式）、`tools/build.py`
   一键构建 exe + wheel + 发布 zip、`tools/make_icon.py` 生成多尺寸 ICO、
   Windows 版本资源自动从 `__version__` 注入。
-- **文档与工程规范**：README、项目介绍文档、贡献指南、第三方许可声明、CI 工作流。
+- **文档与工程规范**：README、项目介绍文档、贡献指南、第三方许可声明、CI 工作流（暂存于 `ci/`，见 `ci/README.md`）。
+- **发布流程**：构建产物附 `SHA256SUMS.txt` 校验和；`ci/release.yml` 支持推送标签后自动建 Release。
 
 ### 修复
 
