@@ -35,7 +35,7 @@ DEMO = [
 def build(app: QApplication) -> MainWindow:
     w = MainWindow()
     w.path_edit.setText(r"D:\notes")
-    w.hint.setText("找到 12 个 .txt 文件")
+    w.hint.setText("找到 12 个文件（txt 11 · md 1）")
     w.hint.setStyleSheet(f"color: {T.ACCENT}; font-size: 12px;")
     w._show_empty(False)
     for kind, src, dst, reason in DEMO:

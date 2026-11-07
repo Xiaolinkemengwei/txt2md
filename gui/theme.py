@@ -142,7 +142,33 @@ def qss() -> str:
         padding: 0 8px;
         min-height: 26px;
     }}
-    QPushButton[variant="ghost"]:hover {{ background: {ACCENT_TINT}; }}
+    QPushButton[chip="true"] {{
+        background: {CARD};
+        border: 1px solid {STROKE};
+        border-radius: 15px;
+        padding: 0 12px;
+        font-size: 12px;
+        font-weight: 600;
+        font-family: "Cascadia Mono", Consolas, monospace;
+        color: {TEXT_SECOND};
+    }}
+    QPushButton[chip="true"]:hover {{
+        background: {ACCENT_TINT};
+        color: {TEXT};
+        border-color: {STROKE_STRONG};
+    }}
+    QPushButton[chip="true"]:checked {{
+        background: {ACCENT};
+        border-color: {ACCENT};
+        color: #FFFFFF;
+    }}
+    QPushButton[chip="true"]:checked:hover {{ background: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
+    QPushButton[chip="true"]:disabled {{
+        color: {TEXT_DISABLED};
+        background: #FAFAFA;
+        border-color: {STROKE};
+    }}
+QPushButton[variant="ghost"]:hover {{ background: {ACCENT_TINT}; }}
     QPushButton[variant="ghost"]:pressed {{ background: #DCE9F7; }}
     QPushButton:disabled {{
         background: #F0F0F0;

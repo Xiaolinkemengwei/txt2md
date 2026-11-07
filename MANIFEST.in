@@ -1,0 +1,25 @@
+# 源码分发包（sdist）的内容清单。
+# 被 pip 的构建后端读取，决定 `python -m build --sdist` 打进去哪些文件。
+# 注意：wheel 不会包含这里的多数文件，只含包本体——这是正常的。
+
+include LICENSE
+include README.md
+include CHANGELOG.md
+include CONTRIBUTING.md
+include THIRD_PARTY_NOTICES.md
+include requirements.txt
+include txt2md.spec
+
+include tools/*.py
+include tools/*.md
+
+recursive-include docs *.md
+recursive-include ci *.yml
+recursive-include ci *.md
+recursive-include research *.md
+recursive-include tests *.py
+
+global-exclude __pycache__ *.py[cod] *.egg-info
+prune build
+prune dist
+prune .smoke

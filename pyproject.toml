@@ -4,14 +4,18 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "txt2md"
-version = "1.0.0"
-description = "TXT 一键转 Markdown：批量转换、GBK/UTF-8 编码自动识别、Fluent Design 桌面界面"
+version = "2.0.0"
+description = "文档格式互转工具：txt / md / html / csv / xlsx / docx / pdf 双向转换，支持中文编码自动识别与 Fluent Design 桌面界面"
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "txt2md contributors" }]
-keywords = ["markdown", "txt", "converter", "batch", "windows", "fluent", "pyside6"]
+keywords = [
+    "markdown", "txt", "docx", "xlsx", "pdf", "converter",
+    "document-conversion", "batch", "chinese", "gbk", "windows",
+    "fluent", "pyside6",
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Environment :: Win32 (MS Windows)",
@@ -19,13 +23,27 @@ classifiers = [
     "Natural Language :: Chinese (Simplified)",
     "Operating System :: Microsoft :: Windows",
     "Programming Language :: Python :: 3",
+    "Topic :: Office/Business :: Office Suites",
     "Topic :: Text Processing :: Markup :: Markdown",
     "Topic :: Utilities",
 ]
 
+dependencies = [
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "pdfplumber>=0.11",
+    "charset-normalizer>=3.0",
+]
+
 [project.optional-dependencies]
 gui = ["PySide6-Essentials>=6.6"]
-dev = ["PySide6-Essentials>=6.6", "pyinstaller>=6.0"]
+# 兜底引擎：体积较大（内含 pandoc 二进制约 231MB），按需启用
+pandoc = ["pypandoc-binary>=1.13"]
+dev = [
+    "PySide6-Essentials>=6.6",
+    "pyinstaller>=6.0",
+    "pypandoc-binary>=1.13",
+]
 
 [project.urls]
 Homepage = "https://github.com/Xiaolinkemengwei/txt2md"
@@ -40,4 +58,4 @@ txt2md = "txt2md:main"
 py-modules = ["txt2md"]
 
 [tool.setuptools.packages.find]
-include = ["gui*"]
+include = ["core*", "gui*"]

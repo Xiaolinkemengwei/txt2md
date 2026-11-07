@@ -17,6 +17,33 @@
 满足重新链接的要求。若你需要完全规避 LGPL 义务，可仅使用本项目的命令行部分
 （`txt2md.py`，纯标准库，不依赖 Qt）。
 
+## 文档格式处理库（2.0 新增）
+
+2.0 起支持多格式互转，引入以下纯 Python 库。全部为宽松许可（MIT / BSD），
+不产生与本项目 MIT 许可的冲突。
+
+| 组件 | 许可 | 用途 | 是否打包进 exe |
+| --- | --- | --- | --- |
+| [openpyxl](https://openpyxl.readthedocs.io/) | MIT | 读写 `.xlsx` 工作簿 | 是 |
+| [python-docx](https://python-docx.readthedocs.io/) | MIT | 读写 `.docx` 文档 | 是 |
+| [pdfplumber](https://github.com/jsvine/pdfplumber) | MIT | 提取 PDF 文本层与表格 | 是 |
+| [pdfminer.six](https://github.com/pdfminer/pdfminer.six) | MIT | pdfplumber 的底层解析器 | 是 |
+| [charset-normalizer](https://github.com/Ousret/charset_normalizer) | MIT | 编码探测兜底 | 是 |
+| [lxml](https://lxml.de/) | BSD-3-Clause | python-docx 的 XML 后端 | 是 |
+| [Pillow](https://python-pillow.org/) | HPND | pdfplumber 处理图像对象 | 是 |
+| [pypandoc](https://github.com/JessicaTegner/pypandoc) | MIT | 可选兜底通道，**不打包** | 否 |
+
+**关于 pypandoc / pandoc**：本项目**不**将 pandoc 作为主引擎，仅在内置实现失败时
+作为可选兜底。`pypandoc-binary` 会额外引入约 231 MB 的 pandoc 可执行文件，
+因此默认不安装、不打包；需要时由用户自行 `pip install pypandoc-binary`。
+pandoc 本体为 GPL-2.0-or-later，与本项目 MIT 代码仅通过子进程调用交互，
+不构成衍生作品。
+
+**关于 PDF 生成**：PDF 输出通过调用系统已安装的 Chromium 系浏览器
+（Edge / Chrome / Chromium）以 `--headless --print-to-pdf` 完成，
+不分发、不修改浏览器二进制，属于正常的进程调用。若系统无此类浏览器，
+PDF 输出能力会被自动关闭（见 `--engines` 输出），而不是运行时报错。
+
 ## Segoe UI / Segoe Fluent Icons（微软系统字体）
 
 界面优先使用 Windows 自带字体。字体文件不随本项目分发，仅在运行时按名称引用；

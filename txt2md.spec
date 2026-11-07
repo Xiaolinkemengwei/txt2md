@@ -34,7 +34,7 @@ with open(VERSION_FILE, "w", encoding="utf-8") as f:
   kids=[
     StringFileInfo([StringTable('080404B0', [
       StringStruct('CompanyName', 'txt2md contributors'),
-      StringStruct('FileDescription', 'TXT 转 Markdown 转换工具'),
+      StringStruct('FileDescription', '文档格式互转工具（txt/md/html/csv/xlsx/docx/pdf）'),
       StringStruct('FileVersion', '{VER_STR}'),
       StringStruct('InternalName', 'txt2md'),
       StringStruct('LegalCopyright', 'MIT License'),
@@ -56,14 +56,39 @@ EXCLUDES = [
     "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets", "PySide6.QtSql",
     "PySide6.QtTest", "PySide6.QtDesigner", "PySide6.QtHelp", "PySide6.QtUiTools",
     "PySide6.Qt3DCore", "PySide6.Qt3DRender", "PySide6.QtCharts", "PySide6.QtDataVisualization",
+    # pandoc 二进制约 231MB，不随包分发；用户自行安装时才作为兜底启用
+    "pypandoc", "pypandoc_binary",
 ]
+
+# 动态 import 的模块（读取器/写出器按需 import）必须显式列出，
+# 否则打包后会在运行时才报 ModuleNotFoundError
+HIDDEN = [
+    "gui", "gui.app", "gui.theme", "gui.widgets",
+    "core", "core.model", "core.mdparse", "core.htmlio", "core.readers",
+    "core.writers", "core.registry", "core.pipeline", "core.legacy",
+    "core.errors", "core.pandoc_fallback",
+    # 格式编解码
+    "openpyxl", "openpyxl.styles", "openpyxl.utils",
+    "docx", "pdfplumber", "charset_normalizer",
+    "pdfminer", "pdfminer.high_level", "pdfminer.pdfinterp",
+    "lxml", "lxml.etree", "PIL.Image",
+]
+
+# pdfminer 依赖 CMap 等数据文件，漏了会导致中文 PDF 解析失败
+from PyInstaller.utils.hooks import collect_data_files  # noqa: E402
+DATAS = []
+for pkg in ("pdfminer", "charset_normalizer", "docx"):
+    try:
+        DATAS += collect_data_files(pkg)
+    except Exception:
+        pass
 
 a = Analysis(
     [ENTRY],
     pathex=[ROOT],
     binaries=[],
-    datas=[],
-    hiddenimports=["gui", "gui.app", "gui.theme", "gui.widgets"],
+    datas=DATAS,
+    hiddenimports=HIDDEN,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

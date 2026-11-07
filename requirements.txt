@@ -1,2 +1,12 @@
-# 图形界面依赖（CLI 只依赖标准库，无需安装）
+# 图形界面（只用命令行可跳过，CLI 的核心转换不依赖它）
 PySide6-Essentials>=6.6
+
+# 各格式的读写能力（缺哪个就少一种格式，不影响其他格式）
+openpyxl>=3.1            # xlsx 读写
+python-docx>=1.1         # docx 读写
+pdfplumber>=0.11         # PDF 文本层读取
+charset-normalizer>=3.0  # 编码探测兜底（解决 GBK/Big5 简繁歧义）
+
+# 可选：格式互转兜底。仅当内置实现处理失败时才会用到，
+# 且安装包会多出约 231 MB（内含 pandoc 二进制），按需启用。
+# pypandoc-binary>=1.13

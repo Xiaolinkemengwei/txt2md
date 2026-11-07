@@ -54,11 +54,19 @@ def step_exe(onedir: bool):
 
 
 def step_python_packages():
-    print("\n[3/5] 构建 Python 安装包（wheel）")
+    print("\n[3/5] 构建 Python 安装包（wheel + sdist）")
     try:
         run([sys.executable, "-m", "pip", "wheel", ".", "-w", str(DIST), "--no-deps"])
     except SystemExit as e:
         print(f"跳过 wheel：{e}")
+    try:
+        # 不用 `python -m build`：那要额外装 build 包。setuptools 自带 PEP 517
+        # 后端接口，直接调即可，少一个构建期依赖。
+        from setuptools import build_meta
+        made = build_meta.build_sdist(str(DIST))
+        print(f"  {made}")
+    except Exception as e:
+        print(f"跳过 sdist：{e}")
 
 
 def step_zip(onedir: bool):

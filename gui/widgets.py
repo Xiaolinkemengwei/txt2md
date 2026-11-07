@@ -3,8 +3,8 @@
 from PySide6.QtCore import (Property, QEasingCurve, QPropertyAnimation, QRectF,
                             Qt, Signal)
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QLinearGradient, QPainter, QPen
-from PySide6.QtWidgets import (QFrame, QGraphicsDropShadowEffect, QHBoxLayout, QLabel,
-                               QPushButton, QSizePolicy, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QGraphicsDropShadowEffect,
+                               QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget)
 
 from . import theme as T
 
@@ -268,3 +268,68 @@ class LogRow(QWidget):
         lay.addWidget(tail, 1)
 
         self.setFixedHeight(28)
+
+
+# ---------------------------------------------------------------- 格式选择
+class FormatChips(QWidget):
+    """一排胶囊按钮做格式单选。
+
+    为什么不用下拉框：格式数量固定（7 个）且用户需要一眼看到「哪些格式
+    在当前机器上可用」。下拉框把可用性藏起来了，用户选中后才知道不行。
+    这里的不可用项直接置灰，悬停给出原因。
+    """
+
+    changed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        from core.registry import FORMATS, capability
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+        self._buttons: dict[str, QPushButton] = {}
+        self._current = "md"
+
+        for code, fmt in FORMATS.items():
+            cap = capability(code)
+            btn = QPushButton(code)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor if cap.can_write else Qt.ForbiddenCursor)
+            btn.setProperty("chip", True)
+            btn.setFixedHeight(30)
+            btn.setMinimumWidth(50)
+            btn.setFocusPolicy(Qt.NoFocus)
+            if cap.can_write:
+                level = {"●": "高", "◐": "中", "○": "低"}.get(cap.fidelity_write, "")
+                btn.setToolTip(f"{fmt.label} · {cap.engine_write} · 保真{level}")
+            else:
+                btn.setEnabled(False)
+                btn.setToolTip(f"{fmt.label}：当前环境无法写出（{cap.note or '缺少依赖'}）")
+            self._group.addButton(btn)
+            self._buttons[code] = btn
+            lay.addWidget(btn)
+
+        lay.addStretch(1)
+        self._group.idClicked.connect(self._on_click)
+        self.set_format("md")
+
+    def _on_click(self, _id: int):
+        for code, b in self._buttons.items():
+            if b.isChecked() and code != self._current:
+                self._current = code
+                self.changed.emit(code)
+                return
+
+    def current_format(self) -> str:
+        return self._current
+
+    def set_format(self, code: str):
+        btn = self._buttons.get(code)
+        if btn is None or not btn.isEnabled():
+            return
+        btn.setChecked(True)
+        self._current = code

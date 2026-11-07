@@ -1,8 +1,8 @@
-"""Fluent Design 主窗口。
+"""Fluent Design 主窗口（2.0）。
 
-交互流程与原 tkinter 版本完全一致：
-选文件/文件夹 → 勾选选项 → 一键转换 → 逐条日志 + 汇总。
-转换逻辑复用 txt2md.py 的 collect_txt_files / convert_file，未做任何改动。
+交互主线：选文件/文件夹 → 选目标格式 → 一键转换 → 逐条日志 + 汇总。
+转换执行交给 core.pipeline，界面只负责「让用户在动手前就知道会发生什么」：
+格式选项按引擎能力置灰、被拦下的任务当场说明原因、失败的绝不留下半成品。
 """
 
 import sys
@@ -15,40 +15,46 @@ from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, Q
                                QMessageBox, QProgressBar, QSizePolicy, QVBoxLayout,
                                QWidget)
 
-# 复用核心转换逻辑
+# 复用核心转换管线
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from txt2md import collect_txt_files, convert_file  # noqa: E402
+from core.pipeline import collect_inputs, convert_one, plan_jobs, precheck  # noqa: E402
+from core.registry import (ALL_EXTENSIONS, FORMATS, capability,  # noqa: E402
+                           describe_environment, resolve_format)
 
 from . import theme as T
-from .widgets import (Card, FluentSwitch, HoverRow, IconTile, LogRow, make_button)
+from .widgets import (Card, FluentSwitch, FormatChips, HoverRow, IconTile, LogRow,
+                      make_button)
 
 
 # ---------------------------------------------------------------- 转换线程
 class ConvertWorker(QThread):
-    """在后台线程执行转换，逐条推送结果，避免界面卡顿。"""
+    """在后台线程逐条执行转换。
 
-    item_ready = Signal(str, str, str, str)   # kind, src, dst, reason
+    单个任务失败只记录不中断——批量转换里最怕「一个坏文件让后面全不跑」。
+    """
+
+    item_ready = Signal(str, str, str, str)   # status, src, dst, reason
     finished_all = Signal(int, int, int, int)  # ok, skipped, error, total
 
-    def __init__(self, jobs: list[Path], smart: bool, overwrite: bool, parent=None):
+    def __init__(self, jobs: list, force: bool, parent=None):
         super().__init__(parent)
         self.jobs = jobs
-        self.smart = smart
-        self.overwrite = overwrite
+        self.force = force
 
     def run(self):
         ok = skipped = error = 0
-        for src in self.jobs:
-            try:
-                status, dst = convert_file(src, src.parent, self.smart, self.overwrite)
-                if status == "ok":
-                    ok += 1
-                elif status == "skipped":
-                    skipped += 1
-                self.item_ready.emit(status, str(src), dst, "")
-            except Exception as e:  # 单文件失败不中断
+        for job in self.jobs:
+            result = convert_one(job, force=self.force)
+            if result.status == "ok":
+                ok += 1
+            elif result.status == "skipped":
+                skipped += 1
+            else:
                 error += 1
-                self.item_ready.emit("error", str(src), "", str(e))
+            reason = result.reason
+            if not reason and result.warnings:
+                reason = "；".join(result.warnings)
+            self.item_ready.emit(result.status, str(job.src), str(job.dst), reason)
         self.finished_all.emit(ok, skipped, error, len(self.jobs))
 
 
@@ -56,14 +62,15 @@ class ConvertWorker(QThread):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("TXT 转 Markdown")
-        self.resize(1000, 800)
+        self.setWindowTitle("文档格式转换")
+        self.resize(1060, 880)
         self.setMinimumSize(720, 660)
         self.setAcceptDrops(True)
 
         self.paths: list[Path] = []
         self.worker: ConvertWorker | None = None
-        self.txt_total = 0
+        self.found_files: list[Path] = []
+        self.scan_notes: list[str] = []
 
         root = QWidget()
         root.setObjectName("appRoot")
@@ -91,9 +98,9 @@ class MainWindow(QMainWindow):
 
         col = QVBoxLayout()
         col.setSpacing(3)
-        title = QLabel("TXT 转 Markdown")
+        title = QLabel("文档格式转换")
         title.setObjectName("appTitle")
-        sub = QLabel("批量转换 · GBK/UTF-8 编码自动识别 · 智能排版")
+        sub = QLabel(f"txt · md · html · csv · xlsx · docx · pdf 互转　|　{describe_environment()}")
         sub.setObjectName("subtitle")
         col.addWidget(title)
         col.addWidget(sub)
@@ -148,16 +155,52 @@ class MainWindow(QMainWindow):
         lay.addWidget(t)
         lay.addSpacing(6)
 
+        # -- 目标格式
+        fmt_row = QWidget()
+        fmt_lay = QVBoxLayout(fmt_row)
+        fmt_lay.setContentsMargins(10, 4, 10, 6)
+        fmt_lay.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        lab = QLabel("目标格式")
+        lab.setStyleSheet(f"font-size: 13px; font-weight: 600; color: {T.TEXT};")
+        self.fmt_hint = QLabel()
+        self.fmt_hint.setStyleSheet(f"font-size: 12px; color: {T.TEXT_SECOND};")
+        top.addWidget(lab)
+        top.addStretch(1)
+        top.addWidget(self.fmt_hint)
+        fmt_lay.addLayout(top)
+
+        self.chips = FormatChips()
+        self.chips.changed.connect(self._on_format_changed)
+        fmt_lay.addWidget(self.chips)
+        lay.addWidget(fmt_row)
+        self._on_format_changed(self.chips.current_format())
+
+        lay.addWidget(self._divider())
+
         self.sw_smart = FluentSwitch(checked=True)
         lay.addWidget(self._option_row(
-            "智能排版", "首行作为标题、识别列表标记，正文内容不做删改", self.sw_smart))
+            "智能排版", "纯文本输入时首行作标题、识别列表；关闭则逐字保留", self.sw_smart))
 
         lay.addWidget(self._divider())
 
         self.sw_overwrite = FluentSwitch(checked=False)
         lay.addWidget(self._option_row(
-            "覆盖已存在的 .md", "关闭时同名文件自动跳过，不会覆盖已有内容", self.sw_overwrite))
+            "覆盖同名文件", "关闭时目标已存在则自动跳过，不会覆盖已有内容", self.sw_overwrite))
         return card
+
+    def _on_format_changed(self, code: str):
+        fmt = FORMATS.get(code)
+        if fmt is None:
+            return
+        cap = capability(code)
+        # 保真度用文字而非 ●◐○：符号在界面字体下辨识度差
+        level = {"●": "高", "◐": "中", "○": "低"}.get(cap.fidelity_write, "")
+        note = f"　{cap.note}" if cap.note else ""
+        self.fmt_hint.setText(
+            f"{fmt.label}　{cap.engine_write}　保真{level}{note}")
 
     @staticmethod
     def _divider() -> QFrame:
@@ -258,13 +301,19 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------- 选择来源
     def _pick_files(self):
+        exts = " ".join(f"*{e}" for e in ALL_EXTENSIONS)
         files, _ = QFileDialog.getOpenFileNames(
-            self, "选择要转换的 TXT 文件", "", "文本文件 (*.txt);;所有文件 (*.*)")
+            self, "选择要转换的文件", "",
+            f"所有支持的格式 ({exts});;"
+            "文本与标记 (*.txt *.md *.html);;"
+            "办公文档 (*.docx *.xlsx);;"
+            "表格 (*.csv *.xlsx);;"
+            "所有文件 (*.*)")
         if files:
             self._set_paths([Path(f) for f in files])
 
     def _pick_folder(self):
-        d = QFileDialog.getExistingDirectory(self, "选择包含 TXT 文件的文件夹")
+        d = QFileDialog.getExistingDirectory(self, "选择包含待转换文件的文件夹")
         if d:
             self._set_paths([Path(d)])
 
@@ -279,26 +328,58 @@ class MainWindow(QMainWindow):
             self.path_edit.setText(str(paths[0]))
         else:
             self.path_edit.setText(f"{paths[0].parent} 等 {len(paths)} 项")
-        self._rescan()
+        self._rescan(pick_default_target=True)
 
-    def _rescan(self):
-        """统计待转换文件数量，给用户即时反馈。"""
-        self.txt_total = 0
-        for p in self.paths:
-            if p.exists():
-                self.txt_total += len(collect_txt_files(p))
+    def _rescan(self, pick_default_target: bool = False):
+        """扫描待转换文件并刷新提示。"""
+        self.found_files: list[Path] = []
+        if self.paths:
+            self.found_files, _notes = collect_inputs(self.paths)
+        if pick_default_target and self.found_files:
+            self._suggest_target()
         self._update_hint()
+
+    def _suggest_target(self):
+        """源与目标撞了的时候自动换一个——避免用户把 a.md 转成 a.md 白忙一场。"""
+        suffix = {p.suffix.lower() for p in self.found_files}
+        if len(suffix) != 1:
+            return
+        src = resolve_format(next(iter(suffix)).lstrip("."))
+        if src is not None and src.code == self.chips.current_format():
+            self.chips.set_format("txt" if src.code != "txt" else "md")
+            self._on_format_changed(self.chips.current_format())
 
     def _update_hint(self):
         if not self.paths:
             self.hint.setText("尚未选择")
+            self.hint.setStyleSheet(f"color: {T.TEXT_SECOND}; font-size: 12px;")
             return
-        if self.txt_total:
-            self.hint.setText(f"找到 {self.txt_total} 个 .txt 文件")
-            self.hint.setStyleSheet(f"color: {T.ACCENT}; font-size: 12px;")
-        else:
-            self.hint.setText("未找到 .txt 文件")
+        if not self.found_files:
+            self.hint.setText("未找到支持的文件")
             self.hint.setStyleSheet(f"color: {T.DANGER}; font-size: 12px;")
+            return
+
+        counter: dict[str, int] = {}
+        for p in self.found_files:
+            fmt = resolve_format(p.suffix.lstrip("."))
+            key = fmt.code if fmt else "其他"
+            counter[key] = counter.get(key, 0) + 1
+        detail = " · ".join(f"{k} {v}" for k, v in
+                            sorted(counter.items(), key=lambda kv: -kv[1]))
+        self.hint.setText(f"找到 {len(self.found_files)} 个文件（{detail}）")
+        self.hint.setStyleSheet(f"color: {T.ACCENT}; font-size: 12px;")
+
+    def _check_target_supported(self) -> bool:
+        """目标格式在当前环境不可写时，提前拦下并说明原因。"""
+        code = self.chips.current_format()
+        cap = capability(code)
+        if cap.can_write:
+            return True
+        QMessageBox.warning(
+            self, "当前环境不支持",
+            f"无法生成 {FORMATS[code].label}：{cap.note or '缺少必要组件'}。\n\n"
+            "请换一个目标格式，或按 README 的说明安装所需组件。")
+        return False
 
     # -------------------------------------------------- 拖拽支持
     def dragEnterEvent(self, e):
@@ -324,34 +405,57 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
 
     def _set_busy(self, busy: bool):
-        for w in (self.btn_files, self.btn_folder, self.btn_convert, self.path_edit):
+        for w in (self.btn_files, self.btn_folder, self.btn_convert, self.path_edit,
+                  self.chips, self.sw_smart, self.sw_overwrite):
             w.setEnabled(not busy)
         self.btn_convert.setText("转换中…" if busy else "一键转换")
 
     def _start_convert(self):
         if not self.paths:
-            QMessageBox.warning(self, "提示", "请先选择 TXT 文件或文件夹")
+            QMessageBox.warning(self, "提示", "请先选择文件或文件夹")
             return
         self._rescan()
-        if not self.txt_total:
-            QMessageBox.warning(self, "提示", "所选路径中没有找到 .txt 文件")
+        if not self.found_files:
+            QMessageBox.warning(
+                self, "没有可转换的文件",
+                "所选路径中没有找到支持的格式。\n\n"
+                f"支持：{'、'.join(f.extensions[0] for f in FORMATS.values())}")
+            return
+        if not self._check_target_supported():
             return
 
-        jobs: list[Path] = []
-        for p in self.paths:
-            jobs.extend(collect_txt_files(p))
+        dst_code = self.chips.current_format()
+        smart = self.sw_smart.isChecked()
+        force = self.sw_overwrite.isChecked()
 
-        # 清空上一轮日志
+        # 规划与预检：先算出「哪些会失败、为什么」，动手前就告诉用户
+        jobs = plan_jobs(self.found_files, dst_code)
+        for job in jobs:
+            job.options["smart"] = smart
+            if not smart:
+                job.options["verbatim"] = True
+        ready, blocked, _ = precheck(jobs, force=force)
+
         self.log.clear()
         self._show_empty(False)
         self.progress.setVisible(True)
         self.progress.setRange(0, len(jobs))
         self.progress.setValue(0)
-        self.summary.setText(f"共 {len(jobs)} 个文件")
-        self._set_busy(True)
+        self.summary.setText(f"共 {len(jobs)} 个文件 → {dst_code}")
+        self.summary.setStyleSheet(f"color: {T.TEXT_SECOND}; font-size: 12px;")
 
-        self.worker = ConvertWorker(jobs, self.sw_smart.isChecked(),
-                                    self.sw_overwrite.isChecked())
+        # 被拦下的当场落到日志，不必占用转换线程
+        for job in blocked:
+            reason = job.options.get("_blocked_by", "")
+            status = "skipped" if reason.startswith("目标文件已存在") else "error"
+            self._on_item(status, str(job.src), str(job.dst), reason)
+
+        if not ready:
+            self._on_finished(0, len(blocked), len(jobs) - len(blocked), len(jobs))
+            return
+
+        self._set_busy(True)
+        self.worker = ConvertWorker(ready, force)
         self.worker.item_ready.connect(self._on_item)
         self.worker.finished_all.connect(self._on_finished)
         self.worker.start()
@@ -375,11 +479,11 @@ class MainWindow(QMainWindow):
         else:
             self.summary.setStyleSheet(f"color: {T.SUCCESS}; font-size: 12px;")
 
-        if error == 0:
-            QMessageBox.information(self, "完成", f"转换完成：成功 {ok}，跳过 {skipped}")
-        else:
-            QMessageBox.warning(self, "部分失败",
-                                f"成功 {ok}，跳过 {skipped}，失败 {error}。\n详见转换日志。")
+        # 只有失败才打断用户：全部成功时界面上已有汇总，弹框只会碍事
+        if error:
+            QMessageBox.warning(self, "部分文件失败",
+                                f"成功 {ok}，跳过 {skipped}，失败 {error}。\n"
+                                "失败原因已列在转换日志中，原件未被改动。")
 
 
 # ---------------------------------------------------------------- 入口
@@ -404,7 +508,7 @@ def run() -> int:
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough)
     app = QApplication(sys.argv)
-    app.setApplicationName("TXT 转 Markdown")
+    app.setApplicationName("文档格式转换")
     T.init_fonts()  # 字体探测需在 QApplication 之后
     app.setFont(QFont(T.UI_FAMILY, 9))
     app.setStyleSheet(T.qss())
