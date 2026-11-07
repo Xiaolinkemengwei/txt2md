@@ -1,0 +1,12 @@
+# 默认按文本处理并统一为 LF，Windows 批处理脚本保留 CRLF
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制资源不做换行转换
+*.ico binary
+*.png binary
+*.jpg binary
+*.exe binary
+*.zip binary
+*.whl binary

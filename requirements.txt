@@ -1,0 +1,2 @@
+# 图形界面依赖（CLI 只依赖标准库，无需安装）
+PySide6-Essentials>=6.6

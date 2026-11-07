@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "txt2md"
+version = "1.0.0"
+description = "TXT 一键转 Markdown：批量转换、GBK/UTF-8 编码自动识别、Fluent Design 桌面界面"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "txt2md contributors" }]
+keywords = ["markdown", "txt", "converter", "batch", "windows", "fluent", "pyside6"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "Natural Language :: Chinese (Simplified)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Utilities",
+]
+
+[project.optional-dependencies]
+gui = ["PySide6-Essentials>=6.6"]
+dev = ["PySide6-Essentials>=6.6", "pyinstaller>=6.0"]
+
+[project.urls]
+Homepage = "https://github.com/your-name/txt2md"
+Repository = "https://github.com/your-name/txt2md"
+Issues = "https://github.com/your-name/txt2md/issues"
+Changelog = "https://github.com/your-name/txt2md/blob/main/CHANGELOG.md"
+
+[project.scripts]
+txt2md = "txt2md:main"
+
+[tool.setuptools]
+py-modules = ["txt2md"]
+
+[tool.setuptools.packages.find]
+include = ["gui*"]

@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# 构建产物
+build/
+dist/
+*.manifest
+
+# 测试临时产物（截图可保留，结果目录忽略）
+tests/out/
+tests/out_plain/
+tests/preview/icon_*.png
+
+# IDE / 系统
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+.DS_Store
+
+# PyInstaller 中间产物
+*.toc
+warn-*.txt
+xref-*.html

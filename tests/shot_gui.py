@@ -1,0 +1,75 @@
+"""界面截图工具（开发自测用）：离屏渲染不同尺寸，检查视觉效果与响应式布局。
+
+用法：
+    python tests/shot_gui.py            # 生成 3 个典型尺寸的截图
+"""
+
+import os
+import sys
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# 离屏平台默认不加载系统字体，显式指定字体目录，否则中文全部渲染为豆腐块
+os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from PySide6.QtCore import QSize  # noqa: E402
+from PySide6.QtWidgets import QApplication, QListWidgetItem  # noqa: E402
+
+from gui import theme as T  # noqa: E402
+from gui.app import MainWindow  # noqa: E402
+from gui.widgets import LogRow  # noqa: E402
+
+DEMO = [
+    ("ok", r"D:\notes\读书笔记.txt", r"D:\notes\读书笔记.md", ""),
+    ("ok", r"D:\notes\2026 工作计划.txt", r"D:\notes\2026 工作计划.md", ""),
+    ("skipped", r"D:\notes\会议纪要.txt", r"D:\notes\会议纪要.md", ""),
+    ("error", r"D:\notes\locked.txt", "", "PermissionError: 文件被占用"),
+    ("ok", r"D:\notes\sub\产品需求草案-最终版-复本.txt",
+     r"D:\notes\sub\产品需求草案-最终版-复本.md", ""),
+]
+
+
+def build(app: QApplication) -> MainWindow:
+    w = MainWindow()
+    w.path_edit.setText(r"D:\notes")
+    w.hint.setText("找到 12 个 .txt 文件")
+    w.hint.setStyleSheet(f"color: {T.ACCENT}; font-size: 12px;")
+    w._show_empty(False)
+    for kind, src, dst, reason in DEMO:
+        item = QListWidgetItem()
+        item.setSizeHint(QSize(0, 28))
+        w.log.addItem(item)
+        w.log.setItemWidget(item, LogRow(kind, src, dst, reason))
+    w.summary.setText("成功 3 · 跳过 1 · 失败 1")
+    w.summary.setStyleSheet(f"color: {T.DANGER}; font-size: 12px;")
+    w.progress.setRange(0, 12)
+    w.progress.setValue(9)
+    return w
+
+
+def main():
+    app = QApplication(sys.argv)
+    T.init_fonts()
+    app.setStyleSheet(T.qss())
+    out_dir = ROOT / "tests" / "preview"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, size in [("wide", (1120, 820)), ("default", (1000, 800)),
+                       ("compact", (720, 660)), ("tall", (860, 1000)), ("min", (720, 660))]:
+        w = build(app)
+        w.resize(*size)
+        w.show()
+        app.processEvents()
+        for _ in range(3):
+            app.processEvents()
+        path = out_dir / f"gui_{name}.png"
+        w.grab().save(str(path))
+        print("saved", path)
+        w.close()
+
+
+if __name__ == "__main__":
+    main()
