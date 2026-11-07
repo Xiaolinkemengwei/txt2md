@@ -5,7 +5,7 @@
 ## 开发环境
 
 ```bash
-git clone https://github.com/your-name/txt2md.git
+git clone https://github.com/Xiaolinkemengwei/txt2md.git
 cd txt2md
 
 python -m venv .venv

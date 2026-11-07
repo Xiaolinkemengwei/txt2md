@@ -28,10 +28,10 @@ gui = ["PySide6-Essentials>=6.6"]
 dev = ["PySide6-Essentials>=6.6", "pyinstaller>=6.0"]
 
 [project.urls]
-Homepage = "https://github.com/your-name/txt2md"
-Repository = "https://github.com/your-name/txt2md"
-Issues = "https://github.com/your-name/txt2md/issues"
-Changelog = "https://github.com/your-name/txt2md/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Xiaolinkemengwei/txt2md"
+Repository = "https://github.com/Xiaolinkemengwei/txt2md"
+Issues = "https://github.com/Xiaolinkemengwei/txt2md/issues"
+Changelog = "https://github.com/Xiaolinkemengwei/txt2md/blob/main/CHANGELOG.md"
 
 [project.scripts]
 txt2md = "txt2md:main"

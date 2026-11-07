@@ -46,5 +46,5 @@
 - 仅提供 Windows 打包产物；macOS/Linux 需从源码运行。
 - `Big5` 解码路径已实现但未在真实语料上验证。
 
-[Unreleased]: https://github.com/your-name/txt2md/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/your-name/txt2md/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Xiaolinkemengwei/txt2md/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Xiaolinkemengwei/txt2md/releases/tag/v1.0.0

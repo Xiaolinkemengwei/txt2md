@@ -32,7 +32,7 @@
 
 ### 下载即用（推荐）
 
-1. 到 [Releases](https://github.com/your-name/txt2md/releases) 下载 `txt2md-1.0.0-win64.zip`
+1. 到 [Releases](https://github.com/Xiaolinkemengwei/txt2md/releases) 下载 `txt2md-1.0.0-win64.zip`
 2. 解压到任意目录（免安装、不写注册表）
 3. 双击 `txt2md.exe`
 
@@ -49,7 +49,7 @@ pip install "txt2md[gui]"   # 含图形界面
 ### 源码
 
 ```bash
-git clone https://github.com/your-name/txt2md.git
+git clone https://github.com/Xiaolinkemengwei/txt2md.git
 cd txt2md
 
 python txt2md.py notes.txt            # 命令行：无需安装依赖

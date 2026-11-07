@@ -5,6 +5,7 @@
     txt2md-<ver>-win64.zip        发布压缩包（exe + 文档 + 许可）
     txt2md-<ver>-py3-none-any.whl Python 安装包
     txt2md-<ver>.tar.gz           源码分发包
+    SHA256SUMS.txt                各产物的 SHA-256 校验和（供下载后核验）
 
 用法：
     python tools/build.py              # 全部构建
@@ -13,6 +14,7 @@
 """
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -39,12 +41,12 @@ def run(cmd: list[str], env: dict | None = None):
 
 
 def step_icon():
-    print("\n[1/4] 生成应用图标")
+    print("\n[1/5] 生成应用图标")
     run([sys.executable, str(ROOT / "tools" / "make_icon.py")])
 
 
 def step_exe(onedir: bool):
-    print(f"\n[2/4] 打包可执行文件（{'目录版' if onedir else '单文件'}）")
+    print(f"\n[2/5] 打包可执行文件（{'目录版' if onedir else '单文件'}）")
     env = dict(os.environ)
     env["TXT2MD_ONEFILE"] = "0" if onedir else "1"
     run([sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean",
@@ -52,7 +54,7 @@ def step_exe(onedir: bool):
 
 
 def step_python_packages():
-    print("\n[3/4] 构建 Python 安装包（wheel）")
+    print("\n[3/5] 构建 Python 安装包（wheel）")
     try:
         run([sys.executable, "-m", "pip", "wheel", ".", "-w", str(DIST), "--no-deps"])
     except SystemExit as e:
@@ -60,7 +62,7 @@ def step_python_packages():
 
 
 def step_zip(onedir: bool):
-    print("\n[4/4] 生成发布压缩包")
+    print("\n[4/5] 生成发布压缩包")
     name = f"txt2md-{VERSION}-win64.zip"
     zip_path = DIST / name
 
@@ -90,6 +92,26 @@ def step_zip(onedir: bool):
         exe_size = exe.stat().st_size
 
     print(f"  {zip_path.name}  (解压后 {exe_size / 1024 / 1024:.1f} MB)")
+
+
+def step_checksums():
+    """为 dist/ 中的发布产物生成 SHA-256 校验和，便于用户下载后核验完整性。"""
+    print("\n[5/5] 生成 SHA-256 校验和")
+    targets = sorted(
+        f for f in DIST.iterdir()
+        if f.is_file() and f.name != "SHA256SUMS.txt"
+        and f.suffix in {".exe", ".zip", ".whl", ".gz"}
+    )
+    lines = []
+    for f in targets:
+        h = hashlib.sha256()
+        with f.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        lines.append(f"{h.hexdigest()}  {f.name}")
+        print(f"  {h.hexdigest()[:16]}…  {f.name}")
+    (DIST / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"  已写入 {DIST / 'SHA256SUMS.txt'}")
 
 
 def _human(size: int) -> str:
@@ -132,6 +154,7 @@ def main():
     if not args.no_wheel:
         step_python_packages()
     step_zip(args.onedir)
+    step_checksums()
     summarize()
 
 
