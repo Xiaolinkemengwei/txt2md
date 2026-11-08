@@ -992,6 +992,36 @@ def test_progress(tmp: Path):
     check("无回调也能转换", ok.status == "ok", ok.reason)
 
 
+def test_format_listing(tmp: Path):
+    section("15. 格式清单一致性")
+    import subprocess
+
+    from core.registry import codes
+
+    writable = codes()
+    check("清单含 EPUB", "epub" in writable, str(writable))
+    check("清单不含只能作输入的图片", "image" not in writable, str(writable))
+    check("清单与注册表一致",
+          writable == [c for c, f in FORMATS.items() if f.can_write], str(writable))
+    check("清单无重复", len(writable) == len(set(writable)), str(writable))
+
+    # 帮助与报错文本曾经是手写字符串，2.3 加 EPUB 时漏改了三处。
+    # 这里以注册表为准反查，避免以后再加格式又漏。
+    def run_cli(*args: str) -> str:
+        p = subprocess.run([sys.executable, str(ROOT / "aieye.py"), *args],
+                           capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+        return (p.stdout or "") + (p.stderr or "")
+
+    help_text = run_cli("--help")
+    missing = [c for c in writable if c not in help_text]
+    check("--help 列出全部格式", not missing, f"缺少 {missing}")
+
+    err_text = run_cli("nothing.md", "-t", "bogus")
+    missing_err = [c for c in writable if c not in err_text]
+    check("报错提示列出全部格式", not missing_err, f"缺少 {missing_err}")
+
+
 def main() -> int:
     print("=" * 66)
     print("AI eye 转换内核测试")
@@ -1012,6 +1042,7 @@ def main() -> int:
         test_epub(tmp)
         test_aieye(tmp)
         test_progress(tmp)
+        test_format_listing(tmp)
         test_verify(tmp)
         test_cli_output(tmp)
     finally:

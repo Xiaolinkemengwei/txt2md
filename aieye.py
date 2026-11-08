@@ -3,7 +3,7 @@
 """
 AI eye —— 一眼看懂，一键转好的文档格式互转工具
 
-支持的格式：txt / md / html / csv / xlsx / docx / pdf，任意两种之间双向转换；
+支持的格式：txt / md / html / epub / csv / xlsx / docx / pdf，任意两种之间双向转换；
 纯图片 PDF（扫描件）可用 OCR 识别。
 
 用法:
@@ -200,10 +200,12 @@ def show_formats():
 
 
 def show_engines():
-    from core.registry import describe_environment, detect_engines
+    from core.registry import codes, describe_environment, detect_engines
 
     e = detect_engines(refresh=True)
-    print("内置引擎：总是可用（txt / md / html / csv / xlsx / docx 全部功能）\n")
+    # pdf 不算「内置」：读要 pdfplumber，写要浏览器，两条都在下面单独列
+    builtin = " / ".join(c for c in codes() if c != "pdf")
+    print(f"内置引擎：总是可用（{builtin} 全部功能）\n")
     rows = [
         ("浏览器", e.browser or "", f"PDF 输出{f'（{e.browser_name}）' if e.browser else '：缺少则无法生成 PDF'}"),
         ("pandoc", e.pandoc or "", "内置实现失败时的格式互转兜底（可选）"),
@@ -258,6 +260,9 @@ def _probe(module: str) -> str:
 def main():
     _install_stream_guard()
 
+    # 格式清单统一从注册表取，避免加新格式时帮助文本漏改
+    from core.registry import codes
+
     if len(sys.argv) == 2 and sys.argv[1] == "--gui":
         run_gui()
         return
@@ -265,14 +270,14 @@ def main():
     parser = argparse.ArgumentParser(
         prog="aieye",
         description=f"{APP_NAME} v{__version__}："
-                    "txt / md / html / csv / xlsx / docx / pdf 任意双向转换",
+                    f"{' / '.join(codes())} 任意双向转换",
         epilog="示例：  aieye note.txt              # txt → md\n"
                "        aieye report.docx --to txt  # Word → 纯文本\n"
                "        aieye ./docs --to pdf -o out # 目录批量转 PDF",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("paths", nargs="*", help="文件或目录（目录会递归收集支持的格式）")
     parser.add_argument("-t", "--to", default="", metavar="格式",
-                        help="目标格式：txt/md/html/csv/xlsx/docx/pdf（默认 md）")
+                        help=f"目标格式：{'/'.join(codes())}（默认 md）")
     parser.add_argument("-f", "--from", dest="from_format", default="", metavar="格式",
                         help="源格式（默认按扩展名自动判断）")
     parser.add_argument("-o", "--out", type=Path, default=None, metavar="目录",
@@ -323,7 +328,7 @@ def main():
     fmt = resolve_format(to)
     if fmt is None:
         print(f"✗ 不认识的目标格式：{to}", file=sys.stderr)
-        print("  可用格式：txt / md / html / csv / xlsx / docx / pdf", file=sys.stderr)
+        print(f"  可用格式：{' / '.join(codes())}", file=sys.stderr)
         sys.exit(2)
     # 图片只能当源格式：没有任何转换是「生成一张图」
     target_problem = validate_target(fmt.code)

@@ -217,21 +217,33 @@ class MainWindow(QMainWindow):
         self.btn_theme.setFont(icon_font(15))
         self.btn_theme.setToolTip("切换到白天模式" if dark else "切换到黑夜模式")
 
-    def _show_about(self):
-        from core.registry import detect_engines
+    def _about_html(self, engines_obj=None) -> str:
+        """关于对话框正文。
 
-        e = detect_engines()
-        engines = [f"{k}：{'可用' if v else '缺失'}" for k, v in (
-            ("浏览器（PDF 输出）", bool(e.browser)),
-            ("pandoc 兜底", bool(e.pandoc)),
-        )]
-        QMessageBox.about(
-            self, f"关于 {APP_NAME}",
-            f"<b>{APP_NAME}</b> v{APP_VERSION}<br>"
-            f"{APP_TAGLINE}：txt · md · html · csv · xlsx · docx · pdf<br><br>"
-            "全部转换在本机完成，文件不会上传到任何服务器。<br><br>"
-            f"{'<br>'.join(engines)}<br><br>"
-            f"快捷键：Ctrl+O 选文件 · Ctrl+Shift+O 选文件夹 · {SHORTCUT_HINT}")
+        单独成函数是为了可测：格式清单从注册表取，这里少一个硬编码，
+        以后加格式就不会再出现「注册表加了、界面上还印旧清单」。
+        传 engines_obj 可覆盖探测结果，用来断言「有 / 没有」两种措辞。
+        """
+        from core.registry import codes, detect_engines
+
+        e = detect_engines() if engines_obj is None else engines_obj
+        # 不写「可用 / 缺失」：用户看到「缺失」会以为功能坏了。这两项都是
+        # 可选的——pandoc 只在内置实现失败时兜底，没有它照样能转；
+        # 浏览器只管 PDF 输出。所以写清「缺了会怎样」。
+        engine_lines = [
+            "浏览器（输出 PDF）："
+            + (f"可用（{e.browser_name}）" if e.browser else "未检测到，无法输出 PDF"),
+            "pandoc（可选兜底）："
+            + (f"可用（{e.pandoc_version}）" if e.pandoc else "未安装，不影响其它转换"),
+        ]
+        return (f"<b>{APP_NAME}</b> v{APP_VERSION}<br>"
+                f"{APP_TAGLINE}：{' · '.join(codes())}<br><br>"
+                "全部转换在本机完成，文件不会上传到任何服务器。<br><br>"
+                f"{'<br>'.join(engine_lines)}<br><br>"
+                f"快捷键：Ctrl+O 选文件 · Ctrl+Shift+O 选文件夹<br>{SHORTCUT_HINT}")
+
+    def _show_about(self):
+        QMessageBox.about(self, f"关于 {APP_NAME}", self._about_html())
 
     # -------------------------------------------------- 卡片：源文件
     def _build_source_card(self) -> Card:

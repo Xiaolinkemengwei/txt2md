@@ -102,6 +102,17 @@ def format_of_path(path: Path) -> Format | None:
     return resolve_format(path.suffix)
 
 
+def codes(*, writable: bool = True) -> list[str]:
+    """按注册顺序列出格式代号。
+
+    关于对话框、CLI 帮助、报错提示里的格式清单都从这里取，不再手写字符串。
+    2.3 新增 EPUB 时就是漏改了这些手写清单——格式表里加了，界面上还印着
+    7 种，用户只能靠猜。默认只列能作为输出目标的格式：图片只能当输入
+    （没有任何转换是「生成一张图」），不该出现在「可转成什么」里。
+    """
+    return [f.code for f in FORMATS.values() if f.can_write or not writable]
+
+
 # ---------------------------------------------------------------- 引擎探测
 @dataclass
 class Engines:

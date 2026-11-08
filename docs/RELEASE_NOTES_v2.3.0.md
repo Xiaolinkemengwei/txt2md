@@ -87,22 +87,35 @@
 ```markdown
 ---
 aieye: 1
-title: 股市常用技术指标买卖形态图谱大全
-source: 图谱.pdf
+title: 示例文档
+source: sample.pdf
 source_format: pdf
 target_format: md
-chars_zh: 128400
-paragraphs: 1842
-headings: 96
-figures: 214
+language: zh
+chars_zh: 12000
+words_en: 0
+paragraphs: 180
+headings: 24
+tables: 3
+figures: 16
 generated_by: AI eye 2.3.0
+generated_at: 2026-01-01T00:00
 ---
+
+## 一、文档概况
+
+- **开头内容**：本章交代背景与适用范围。
+- **规模**：约 12000 个汉字 / 0 个英文词，180 段，24 个标题，3 张表，16 幅插图
+- **来源**：`sample.pdf`（pdf）
+- **本次产物**：`md` 格式
 
 ## 二、结构地图
 
 | 层级 | 标题 | 位置 | 摘要 |
-| H1 | 第三章 上升旗形 | 34% | 旗形整理出现在急涨之后… |
-| H2 | 3.1 形态特征 | 36% | 两条平行趋势线… |
+| --- | --- | --- | --- |
+| H1 | 第一章 概述 | 0% | 本章交代背景与适用范围。 |
+| H2 | 1.1 背景 | 4% | 相关工作的简要回顾。 |
+| H1 | 第二章 方法 | 38% | 核心流程与关键参数说明。 |
 ```
 
 - **结构地图**：每个标题的层级、位置百分比、该章首段摘要

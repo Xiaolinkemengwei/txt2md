@@ -434,6 +434,30 @@ def test_epub_source(app: QApplication, win: MainWindow, tmp: Path):
         check("两章内容都在", "第一章" in body and "第二章" in body, body[:80])
 
 
+def test_about(win: MainWindow):
+    print("\n14. 关于对话框")
+    from core.registry import Engines, codes
+
+    html = win._about_html()
+    plain = html.replace("<br>", "\n")
+    missing = [c for c in codes() if c not in plain]
+    check("格式清单完整", not missing, f"缺少 {missing}")
+    check("列出 EPUB", "epub" in plain, plain[:80])
+    check("有版本号", f"v{__import__('gui.app', fromlist=['APP_VERSION']).APP_VERSION}" in plain)
+    check("文件名不会出现在这里", ".md" not in plain and ".pdf" not in plain)
+
+    # 「缺失」两个字会让用户以为功能坏了；这两项都是可选的，要说清后果
+    empty = win._about_html(Engines()).replace("<br>", "\n")
+    check("无 pandoc 时不写「缺失」", "缺失" not in empty, empty)
+    check("说明 pandoc 不影响转换", "不影响其它转换" in empty, empty)
+    check("说明没浏览器则无法输出 PDF", "无法输出 PDF" in empty, empty)
+
+    full = win._about_html(Engines(pandoc="/usr/bin/pandoc", pandoc_version="3.1.9",
+                                   browser="/chrome", browser_name="Chrome"))
+    check("有引擎时显示版本/名称",
+          "3.1.9" in full and "Chrome" in full, full[-160:])
+
+
 def main() -> int:
     print("=" * 62)
     print("AI eye 界面层测试")
@@ -464,6 +488,7 @@ def main() -> int:
         test_progress(app, win, tmp)
         test_aieye_switch(app, win, tmp)
         test_epub_source(app, win, tmp)
+        test_about(win)
     finally:
         win.close()
         shutil.rmtree(tmp, ignore_errors=True)
