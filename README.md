@@ -3,7 +3,7 @@
 > 一眼看懂，一键转好。把文档从一种格式换成另一种 —— 双向、批量、不丢内容。
 
 <p>
-  <img alt="version" src="https://img.shields.io/badge/version-2.2.0-0F6CBD">
+  <img alt="version" src="https://img.shields.io/badge/version-2.3.0-0F6CBD">
   <img alt="license" src="https://img.shields.io/badge/license-MIT-0F6CBD">
   <img alt="python" src="https://img.shields.io/badge/python-%E2%89%A53.9-0F6CBD">
   <img alt="platform" src="https://img.shields.io/badge/platform-Windows%2010%2F11-0F6CBD">
@@ -11,7 +11,7 @@
 
 ![界面预览](tests/preview/gui_default.png)
 
-txt / md / html / csv / xlsx / docx / pdf 共 7 种格式，任意两种之间可互转。中文编码（GBK / GB18030 / Big5 / UTF-8 / UTF-16）自动识别，Windows 下的记事本老文件不会变乱码；扫描件和图片也能用 OCR 认出来，书里的 K 线图、示意图会被裁出来保留，不再变成一堆坐标数字。
+txt / md / html / epub / csv / xlsx / docx / pdf 共 8 种格式，任意两种之间可互转。中文编码（GBK / GB18030 / Big5 / UTF-8 / UTF-16）自动识别，Windows 下的记事本老文件不会变乱码；扫描件和图片也能用 OCR 认出来，书里的 K 线图、示意图会被裁出来保留，不再变成一堆坐标数字。
 
 - **开箱即用**：不需要装 pandoc、Office 或 LaTeX，PDF 直接用系统自带的 Edge 打印
 - **保真优先**：往返转换后内容零丢失，结构（标题层级、列表嵌套、表格、代码块）完整保留
@@ -30,6 +30,7 @@ Windows 用户：下载 Releases 里的 AIeye.exe，双击即用
 | `txt` 纯文本 | ✓ | ✓ | 内置 | 逐字 |
 | `md` Markdown | ✓ | ✓ | 内置 | 结构完整 |
 | `html` | ✓ | ✓ | 内置 | 内容完整 |
+| `epub` 电子书 | ✓ | ✓ | 内置（zip + XHTML） | 结构完整 |
 | `csv` | ✓ | ✓ | 内置 | 逐格 |
 | `xlsx` Excel | ✓ | ✓ | openpyxl | 逐格 |
 | `docx` Word | ✓ | ✓ | python-docx | 结构完整 |
@@ -63,6 +64,33 @@ pip install "aieye[ocr]"
 # 或手动：
 pip install opencv-python-headless rapidocr-onnxruntime
 ```
+
+### EPUB 电子书
+
+`.epub` 既能当输入也能当输出，只用标准库实现（zipfile + xml），没有任何额外依赖。
+
+- **读**：按 spine（出版方定义的阅读顺序）逐章取正文，不用文件名排序——否则一本书的章节会被读乱
+- 标题层级、列表、表格、插图都能还原；正文没有标题元素时用目录里的标题补上
+- 插图从包里取出来，导出 md/docx 时照常落盘或嵌入
+- **写**：按一级标题分章，生成 EPUB 3（含 nav 目录、OPF 清单、封面之外的完整结构），阅读器里能按章翻页
+- 元信息（书名、作者、语言）会带过去；EPUB → EPUB 属于同格式，直接复制不重组
+
+### AI eye 导读
+
+`--aieye`（界面里是「生成 AI eye 导读」开关）会在产物旁多写一份 `<名称>.aieye.md`：
+
+- **它是什么**：一份给 AI 看的**文档地图**，不是正文。大模型读整本书有两个现实问题——上下文放不下，放得下也容易「中间迷失」，对中段细节印象最浅。导读先告诉它「这文档有什么、大概在哪」。
+- **里面有什么**：YAML front-matter（来源、格式、字数、段落数、图表数）+ 结构地图（每个标题的层级、位置百分比、该章首段摘要）+ 插图清单 + 高频片段 + 使用建议。
+- **只做统计，不做语义推断**：没有分词器、没有 embedding、不调用任何模型。凡是需要「理解」才能得出的结论一律不写——给出错的术语表比不给更糟，而且离线机器上必须能生成。
+- **怎么用**：把 `.aieye.md` 和正文一起交给 AI，或者只给它导读、让它指出该读哪几段。
+
+### 白天 / 黑夜
+
+右上角的太阳/月亮按钮切换主题，选择会记住。深浅两套是**独立调色板**而不是简单反色：深色主题的强调色亮一档，否则白字压在 `#0F6CBD` 上对比度不够；状态徽标（完成/跳过/失败）也各自配了对，保证深色下仍能一眼分清。
+
+| 白天 | 黑夜 |
+|---|---|
+| ![白天](tests/preview/gui_default.png) | ![黑夜](tests/preview/dark_default.png) |
 
 ## 保真到什么程度
 
@@ -254,6 +282,7 @@ python tools/build.py           # 打包
 ## 更多文档
 
 - [项目介绍（完整版）](docs/项目介绍.md)
+- [2.3 发布说明](docs/RELEASE_NOTES_v2.3.0.md) · [EPUB、AI 导读与深色主题方案](docs/2.3-方案-EPUB与AI导读.md)
 - [2.2 发布说明](docs/RELEASE_NOTES_v2.2.0.md) · [图表还原与图片识别方案](docs/2.2-方案-图表还原与图片识别.md)
 - [2.1 发布说明](docs/RELEASE_NOTES_v2.1.0.md)
 - [2.0 设计与实现大纲](docs/2.0-设计与实现大纲.md)

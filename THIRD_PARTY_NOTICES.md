@@ -58,6 +58,12 @@ pandoc 本体为 GPL-2.0-or-later，与本项目 MIT 代码仅通过子进程调
 不分发、不修改浏览器二进制，属于正常的进程调用。若系统无此类浏览器，
 PDF 输出能力会被自动关闭（见 `--engines` 输出），而不是运行时报错。
 
+**关于 EPUB 与 AI eye 导读**（2.3.0 新增）：两者均为**纯标准库实现**，未引入任何
+第三方依赖。EPUB 的容器解析使用 `zipfile` + `xml.etree.ElementTree` + `html.parser`，
+写出使用 `zipfile`；AI 导读的字数统计、标题提取、高频词候选全部基于
+`re` 与内置字符串操作，不含分词模型、不含词表文件。因此本版本
+`requirements.txt` 无变化，离线环境下功能完整可用。
+
 ## Segoe UI / Segoe Fluent Icons（微软系统字体）
 
 界面优先使用 Windows 自带字体。字体文件不随本项目分发，仅在运行时按名称引用；
