@@ -337,6 +337,12 @@ class Document:
     source_encoding: str = ""
     source_title: str = ""
 
+    # 文档元信息（EPUB 的 dc:title / dc:creator / dc:language，docx 的核心属性）。
+    # 写出 EPUB / 生成 AI 导读时要用；其它格式留空即可，不影响既有行为。
+    title: str = ""
+    author: str = ""
+    language: str = ""
+
     # 待落盘的图片（扫描件的插图）。写出器负责复制到目标目录或嵌入文档，
     # 临时文件由 pipeline 在任务结束时统一清理。
     assets: list[ImageRef] = field(default_factory=list)

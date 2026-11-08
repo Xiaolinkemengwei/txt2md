@@ -32,7 +32,7 @@ _BLOCK_TAGS = {"p", "div", "section", "article", "header", "footer", "main",
 class _Extractor(HTMLParser):
     """把 HTML 流式转换为块序列。"""
 
-    def __init__(self):
+    def __init__(self, image_resolver=None):
         super().__init__(convert_charrefs=True)
         self.blocks: list[Block] = []
         self._buf: list[str] = []
@@ -45,6 +45,9 @@ class _Extractor(HTMLParser):
         self._table: list[list[str]] | None = None
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
+        # 图片解析回调：EPUB 读入时用来把 zip 内的图片取成本地 ImageRef。
+        # 不传则退回旧行为（只保留 alt 文本），HTML 读入不受影响。
+        self._img_resolver = image_resolver
 
     # -- 缓冲管理
     def _flush(self, kind: str = "paragraph", level: int = 0):
@@ -128,8 +131,19 @@ class _Extractor(HTMLParser):
             self._close_lists_for(tag)
             self._flush()
         elif tag == "img":
-            alt = dict(attrs).get("alt", "").strip()
-            if alt:
+            attrs_d = dict(attrs)
+            alt = (attrs_d.get("alt") or "").strip()
+            src = (attrs_d.get("src") or "").strip()
+            ref = None
+            if self._img_resolver is not None and src:
+                try:
+                    ref = self._img_resolver(src, alt)
+                except Exception:
+                    ref = None       # 单张图取不到不影响整章
+            if ref is not None:
+                self._flush()
+                self.blocks.append(Block.figure(ref))
+            elif alt:
                 self._buf.append(alt)
 
     def handle_endtag(self, tag):
@@ -155,6 +169,22 @@ class _Extractor(HTMLParser):
             self._buf.clear()
             if text:
                 self.blocks.append(Block(kind="quote", text=text))
+        elif tag == "figcaption":
+            # 图注回填到紧邻的图块上：否则「图 + 一行图注」会变成
+            # 「图, 独立段落」，导出 md/docx 时图注与图分家。
+            text = re.sub(r"\s+", " ", "".join(self._buf)).strip()
+            self._buf.clear()
+            last = self.blocks[-1] if self.blocks else None
+            if text and last is not None and last.kind == "image" and last.image is not None:
+                if not last.image.alt:
+                    last.image.alt = text
+                    last.text = last.image.caption()
+                elif last.image.alt == text:
+                    pass          # alt 与图注同文（EPUB 回读的常见形态），去重
+                else:
+                    self.blocks.append(Block.para(text))
+            elif text:
+                self.blocks.append(Block.para(text))
         elif tag == "li":
             self._flush()
         elif tag in ("ul", "ol"):
@@ -208,9 +238,13 @@ class _Extractor(HTMLParser):
         self._pop_lists()
 
 
-def html_to_doc(text: str) -> TextDoc:
-    """HTML 文本 → 块模型。"""
-    p = _Extractor()
+def html_to_doc(text: str, image_resolver=None) -> TextDoc:
+    """HTML 文本 → 块模型。
+
+    ``image_resolver(src, alt) -> ImageRef | None``：传入时把 ``<img>`` 变成
+    真正的图片块（EPUB 读入用）；不传则只保留 alt 文本，行为与 1.x/2.x 一致。
+    """
+    p = _Extractor(image_resolver)
     try:
         p.feed(text)
         p.close()

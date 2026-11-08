@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QDialog, QFileDialog, QHBoxLayout,
 
 from . import theme as T
 from .widgets import make_button
+from .theme import repolish
 
 # 可另存的目标格式（图片只能作为源，不在此列）
 EXPORT_FORMATS = [
@@ -65,13 +66,13 @@ class ResultViewer(QDialog):
         box = QVBoxLayout()
         box.setSpacing(2)
 
+        # 样式一律走 QSS 的 objectName 规则：内联样式在切换主题时会留在旧颜色上
         title = QLabel(Path(self.dst_path or self.src_path).name)
-        title.setStyleSheet(
-            f"color: {T.TEXT}; font-size: {T.FS_TITLE}px; font-weight: 600;")
+        title.setObjectName("viewerTitle")
         box.addWidget(title)
 
         sub = QLabel(self._subtitle())
-        sub.setStyleSheet(f"color: {T.TEXT_SECOND}; font-size: {T.FS_CAPTION}px;")
+        sub.setObjectName("viewerSub")
         box.addWidget(sub)
 
         tabs = QHBoxLayout()
@@ -82,13 +83,14 @@ class ResultViewer(QDialog):
         self.btn_plain = make_button("纯文本", "ghost")
         for btn, mode in ((self.btn_md, "md"), (self.btn_plain, "plain")):
             btn.setCheckable(True)
+            btn.setProperty("tab", True)   # 选中态由动态属性 + QSS 表达
             btn.setFixedHeight(28)
             btn.clicked.connect(lambda _=False, m=mode: self._apply_mode(m))
             tabs.addWidget(btn)
         tabs.addStretch(1)
 
         hint = QLabel("可直接框选复制，或点右下角「复制全部」")
-        hint.setStyleSheet(f"color: {T.TEXT_TERTIARY}; font-size: {T.FS_CAPTION}px;")
+        hint.setObjectName("viewerHint")
         tabs.addWidget(hint)
         box.addLayout(tabs)
         return box
@@ -107,28 +109,21 @@ class ResultViewer(QDialog):
         self.text = QPlainTextEdit()
         self.text.setReadOnly(True)
         self.text.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.text.setStyleSheet(
-            f"QPlainTextEdit {{ background: {T.CARD}; color: {T.TEXT};"
-            f" border: 1px solid {T.STROKE}; border-radius: {T.R_CARD}px;"
-            f" padding: 10px 12px; font-size: {T.FS_BODY}px; }}"
-            f"QPlainTextEdit:focus {{ border-color: {T.ACCENT}; }}")
+        self.text.setObjectName("viewerText")
         font = QFont(T.MONO_FAMILY)
         font.setPixelSize(T.FS_BODY)
         self.text.setFont(font)
         return self.text
 
-    # 页签的选中态用内联样式：全局 QSS 里 ghost 按钮没有 :checked 规则，
-    # 只靠文字变蓝区分太弱，两个按钮看起来像都是普通链接。
-    _TAB_ON = (f"QPushButton {{ color: {T.ACCENT}; background: {T.ACCENT_TINT};"
-               f" border: none; border-radius: {T.R_CONTROL}px; padding: 3px 12px; }}")
-    _TAB_OFF = (f"QPushButton {{ color: {T.TEXT_SECOND}; background: transparent;"
-                f" border: none; border-radius: {T.R_CONTROL}px; padding: 3px 12px; }}")
-
+    # 页签的选中态用「动态属性 + QSS」表达（QSS 的 [tab="true"][active="true"]）。
+    # 不要用内联 setStyleSheet：那样颜色在调用那一刻就固化了，切到深色主题后
+    # 页签仍会停在浅色底上——这是本项目踩过的坑，所有随主题变的样式都别写内联。
     def _apply_mode(self, mode: str) -> None:
         self.btn_md.setChecked(mode == "md")
         self.btn_plain.setChecked(mode == "plain")
-        self.btn_md.setStyleSheet(self._TAB_ON if mode == "md" else self._TAB_OFF)
-        self.btn_plain.setStyleSheet(self._TAB_ON if mode == "plain" else self._TAB_OFF)
+        for btn, m in ((self.btn_md, "md"), (self.btn_plain, "plain")):
+            btn.setProperty("active", m == mode)
+            repolish(btn)
         if mode == "md":
             body = self._markdown
         else:
@@ -158,8 +153,7 @@ class ResultViewer(QDialog):
         row.setSpacing(8)
 
         self.status = QLabel("")
-        self.status.setStyleSheet(
-            f"color: {T.TEXT_SECOND}; font-size: {T.FS_CAPTION}px;")
+        self.status.setObjectName("viewerStatus")
         row.addWidget(self.status)
         row.addStretch(1)
 
@@ -210,9 +204,6 @@ class ResultViewer(QDialog):
 
     def _export_menu(self) -> None:
         menu = QMenu(self)
-        menu.setStyleSheet(f"QMenu {{ background: {T.CARD};"
-                           f" border: 1px solid {T.STROKE}; padding: 4px; }}"
-                           f"QMenu::item {{ padding: 6px 22px; }}")
         for code, label in EXPORT_FORMATS:
             act = menu.addAction(label)
             act.triggered.connect(lambda _=False, c=code: self._export_as(c))

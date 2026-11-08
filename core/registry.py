@@ -53,6 +53,8 @@ FORMATS: dict[str, Format] = {
     "txt": Format("txt", "纯文本", (".txt", ".text", ".log", ".textile"), "text"),
     "md": Format("md", "Markdown", (".md", ".markdown", ".mdown", ".mkd"), "text"),
     "html": Format("html", "HTML", (".html", ".htm", ".xhtml"), "text"),
+    # EPUB 是打包的 XHTML，读写都走标准库（zipfile + xml），无外部依赖
+    "epub": Format("epub", "EPUB 电子书", (".epub",), "text", binary=True),
     "csv": Format("csv", "CSV", (".csv", ".tsv"), "table"),
     "xlsx": Format("xlsx", "Excel 工作簿", (".xlsx", ".xlsm"), "table", binary=True),
     "docx": Format("docx", "Word 文档", (".docx",), "layout", binary=True),
@@ -70,6 +72,7 @@ ALIASES = {
     "htm": "html",
     "excel": "xlsx", "xls": "xlsx", "workbook": "xlsx",
     "word": "docx", "doc": "docx",
+    "ebook": "epub", "epub3": "epub",
 }
 
 
@@ -257,6 +260,11 @@ def capability(fmt: str, engines: Engines | None = None) -> Capability:
                           "●" if fmt != "html" else "◐", "◐")
     if fmt == "csv":
         return Capability(True, True, "内置", "内置", "●", "●")
+    if fmt == "epub":
+        # 读：按 spine 取章节，标题/列表/表格/插图都能还原
+        # 写：按一级标题分章，版式由阅读器决定（所以写侧是 ◐ 不是 ●）
+        return Capability(True, True, "内置", "内置", "●", "◐",
+                          note="按 spine 顺序读取；写出时按一级标题分章")
     if fmt == "xlsx":
         ok = _importable("openpyxl")
         return Capability(ok, ok, "openpyxl" if ok else "", "openpyxl" if ok else "",

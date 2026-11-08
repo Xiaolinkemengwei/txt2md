@@ -751,6 +751,247 @@ def test_image_input(tmp: Path):
 
 
 
+def test_epub(tmp: Path):
+    section("12. EPUB 读写")
+    import zipfile
+
+    from core.errors import ConvertError
+    from core.registry import FORMATS, matrix, resolve_format
+    from core.readers import read_any
+
+    check("epub 已注册", "epub" in FORMATS)
+    check("epub 可读可写", FORMATS["epub"].can_read and FORMATS["epub"].can_write)
+    check("别名 ebook 可用", (resolve_format("ebook") or FORMATS["txt"]).code == "epub")
+    check(".epub 扩展名可解析", (resolve_format(".epub") or FORMATS["txt"]).code == "epub")
+
+    # ---- md → epub → md 往返
+    src = tmp / "书.md"
+    src.write_text(
+        "# 第一章 起手\n\n第一段，含**加粗**。\n\n- 条目一\n- 条目二\n\n"
+        "## 小节\n\n第二段。\n\n| 名称 | 值 |\n|---|---|\n| 甲 | 1 |\n\n"
+        "# 第二章 收手\n\n结尾。\n", encoding="utf-8")
+    eb = tmp / "书.epub"
+    r = convert_one(Job(src=src, dst=eb, src_format="md", dst_format="epub"), force=True)
+    check("md → epub 成功", r.status == "ok", r.reason)
+
+    if eb.exists():
+        with zipfile.ZipFile(eb) as z:
+            names = z.namelist()
+            first = z.infolist()[0]
+            check("mimetype 是首条目", first.filename == "mimetype", first.filename)
+            check("mimetype 不压缩", first.compress_type == zipfile.ZIP_STORED,
+                  str(first.compress_type))
+            check("mimetype 内容正确",
+                  z.read("mimetype").decode() == "application/epub+zip")
+            check("含 container.xml", "META-INF/container.xml" in names)
+            check("含 OPF 清单", any(n.endswith(".opf") for n in names))
+            check("按一级标题分章", sum(1 for n in names if "/ch" in n) == 2,
+                  str([n for n in names if "/ch" in n]))
+            opf = z.read("OEBPS/content.opf").decode()
+            check("OPF 声明 EPUB 3", 'version="3.0"' in opf)
+            check("OPF 含书名", "<dc:title>" in opf)
+            check("含 EPUB3 目录", any(n.endswith("nav.xhtml") for n in names))
+
+    back = tmp / "回读.md"
+    r2 = convert_one(Job(src=eb, dst=back, src_format="epub", dst_format="md"), force=True)
+    check("epub → md 成功", r2.status == "ok", r2.reason)
+    if back.exists():
+        body = back.read_text("utf-8")
+        check("标题保留", "# 第一章 起手" in body, body[:80])
+        check("二级标题保留", "## 小节" in body, body[:160])
+        check("列表保留", "- 条目一" in body, body[:200])
+        check("表格保留", "| 甲 | 1 |" in body, body[:400])
+        check("两章都在", "第二章 收手" in body, body[-120:])
+
+    # ---- 图片往返（doc.assets 与块内引用两条来源都要覆盖）
+    from core.model import Block, Document, ImageRef, TextDoc
+    from core.writers import write_any
+
+    try:
+        from PIL import Image
+        png = tmp / "插图.png"
+        Image.new("RGB", (240, 120), (20, 90, 160)).save(png)
+        doc = Document(name="图文", source_title="图文")
+        doc.title = "图文测试"
+        doc.author = "作者甲"
+        doc.text = TextDoc([
+            Block.head("有图的一章", 1),
+            Block.para("正文。"),
+            Block.figure(ImageRef(name="插图.png", path=png, alt="图1 示意",
+                                  width=240, height=120)),
+        ])
+        epub2 = tmp / "图文.epub"
+        write_any(doc, epub2, "epub")
+        with zipfile.ZipFile(epub2) as z:
+            check("图片进包", any("images/" in n for n in z.namelist()),
+                  str(z.namelist()))
+        got = read_any(epub2, "epub", assets_dir=str(tmp / "ep_assets"))
+        imgs = [b for b in got.text.blocks if b.kind == "image"]
+        check("图片回读成功", len(imgs) == 1, str(len(imgs)))
+        if imgs:
+            check("图注保留", imgs[0].image.alt == "图1 示意", imgs[0].image.alt)
+            check("尺寸被读出", imgs[0].image.width == 240, str(imgs[0].image.width))
+        check("图注不重复成段落",
+              sum(1 for b in got.text.blocks
+                  if b.kind == "paragraph" and "图1 示意" in b.text) == 0)
+        check("元信息保留", got.title == "图文测试" and got.author == "作者甲",
+              f"{got.title}/{got.author}")
+    except ImportError:
+        print("（跳过 EPUB 图片：未安装 Pillow）")
+
+    # ---- 目录补标题：正文没有 h1 时用 nav 里的标题
+    hand = tmp / "手写.epub"
+    with zipfile.ZipFile(hand, "w") as z:
+        z.writestr(zipfile.ZipInfo("mimetype"), "application/epub+zip",
+                   compress_type=zipfile.ZIP_STORED)
+        z.writestr("META-INF/container.xml",
+                   '<?xml version="1.0"?><container version="1.0" '
+                   'xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                   '<rootfiles><rootfile full-path="OEBPS/content.opf" '
+                   'media-type="application/oebps-package+xml"/></rootfiles></container>')
+        z.writestr("OEBPS/content.opf",
+                   '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" '
+                   'version="3.0" unique-identifier="id"><metadata '
+                   'xmlns:dc="http://purl.org/dc/elements/1.1/">'
+                   '<dc:title>手写书</dc:title><dc:identifier id="id">x</dc:identifier>'
+                   '</metadata><manifest>'
+                   '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" '
+                   'properties="nav"/>'
+                   '<item id="c1" href="ch1.xhtml" media-type="application/xhtml+xml"/>'
+                   '</manifest><spine><itemref idref="c1"/></spine></package>')
+        z.writestr("OEBPS/nav.xhtml",
+                   '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                   '<nav epub:type="toc"><ol><li><a href="ch1.xhtml">第一章 手写目录</a>'
+                   '</li></ol></nav></body></html>')
+        z.writestr("OEBPS/ch1.xhtml",
+                   '<html xmlns="http://www.w3.org/1999/xhtml"><body>'
+                   '<p>正文没有标题元素。</p></body></html>')
+
+    d2 = read_any(hand, "epub")
+    first_block = d2.text.blocks[0] if d2.text.blocks else None
+    check("目录标题补进正文",
+          first_block is not None and first_block.kind == "heading"
+          and "手写目录" in first_block.text,
+          f"{first_block.kind if first_block else None}: "
+          f"{first_block.text if first_block else ''}")
+
+    # ---- 损坏/伪装文件：报错要能看懂，不能抛原始 zip 异常
+    fake = tmp / "假.epub"
+    fake.write_bytes(b"this is not a zip at all")
+    try:
+        read_any(fake, "epub")
+        check("伪装 epub 被拒绝", False, "未抛异常")
+    except ConvertError as exc:
+        check("伪装 epub 被拒绝", "EPUB" in str(exc) or "压缩" in str(exc), str(exc))
+    except Exception as exc:
+        check("伪装 epub 被拒绝", False, f"抛了非 ConvertError：{type(exc).__name__}")
+
+    empty = tmp / "空.epub"
+    with zipfile.ZipFile(empty, "w") as z:
+        z.writestr("readme.txt", "nothing")
+    try:
+        read_any(empty, "epub")
+        check("无清单 epub 被拒绝", False, "未抛异常")
+    except ConvertError as exc:
+        check("无清单 epub 被拒绝", "清单" in str(exc) or "OPF" in str(exc), str(exc))
+
+    # ---- 能力矩阵：8 种格式
+    m = matrix()
+    check("矩阵含 9 种格式", len(m) == 9, str(len(m)))
+    check("epub 可转 pdf", bool(m["epub"]["pdf"]), str(m["epub"]))
+    check("pdf 可转 epub", bool(m["pdf"]["epub"]), str(m["pdf"]))
+
+
+def test_aieye(tmp: Path):
+    section("13. AI eye 导读")
+    from core.aieye_doc import build_guide, guide_path_for
+
+    src = tmp / "导读源.md"
+    src.write_text(
+        "# 第一章 概述\n\n这一章说明背景与目标。\n\n"
+        "## 1.1 细节\n\n细节段落里反复出现「形态」「买点」「形态」等词。\n\n"
+        "### 更深的层\n\n再深一层。\n\n"
+        "# 第二章 方法\n\n方法章节开头。\n", encoding="utf-8")
+    # 目标是 txt 而不是 md：md → md 走「同格式直接复制」，不会产生导读
+    out = tmp / "导读产物.txt"
+    job = Job(src=src, dst=out, src_format="md", dst_format="txt")
+    job.options["aieye"] = True
+    out.unlink(missing_ok=True)
+    r = convert_one(job, force=True)
+    check("开启导读后转换成功", r.status == "ok", r.reason)
+    check("返回导读路径", bool(r.guide), r.guide)
+
+    gp = guide_path_for(out)
+    check("导读文件名正确", r.guide == str(gp), f"{r.guide} vs {gp}")
+    if gp.exists():
+        text = gp.read_text("utf-8")
+        check("含 YAML front-matter", text.startswith("---\naieye: 1"), text[:40])
+        check("记录来源格式", "source_format: md" in text)
+        check("记录规模", "chars_zh:" in text and "paragraphs:" in text)
+        check("含结构地图", "结构地图" in text and "| H1 | 第一章 概述 |" in text, text[:600])
+        check("摘要跟着标题", "这一章说明背景与目标。" in text)
+        check("含使用建议", "使用建议" in text)
+        # 小节编号必须连续：空的插图/关键词小节被跳过时不能留下断号
+        import re as _re
+        nums = _re.findall(r"^## ([一二三四五六七八九十])、", text, _re.M)
+        check("小节编号连续无跳号", nums == ["一", "二", "三"][:len(nums)] and nums,
+              str(nums))
+
+    # ---- 不开启时不产生导读
+    plain = tmp / "无导读.md"
+    plain.unlink(missing_ok=True)
+    r2 = convert_one(Job(src=src, dst=plain, src_format="md", dst_format="md"), force=True)
+    check("未开启不生成导读", r2.guide == "", r2.guide)
+    check("未开启无导读文件", not guide_path_for(plain).exists())
+
+    # ---- 空文档不能炸
+    try:
+        from core.model import Document, TextDoc
+        g = build_guide(Document(text=TextDoc()), source_name="空")
+        check("空文档导读不崩", "AI eye 导读" in g, g[:40])
+    except Exception as exc:
+        check("空文档导读不崩", False, f"{type(exc).__name__}: {exc}")
+
+
+def test_progress(tmp: Path):
+    section("14. 转换进度")
+    from core.pipeline import run
+
+    src = tmp / "进度.md"
+    src.write_text("# 章一\n\n内容。\n\n# 章二\n\n内容。\n", encoding="utf-8")
+    ep = tmp / "进度.epub"
+    ep.unlink(missing_ok=True)
+    r = convert_one(Job(src=src, dst=ep, src_format="md", dst_format="epub"), force=True)
+
+    events: list[tuple[int, int, float, str]] = []
+    jobs = [
+        Job(src=src, dst=tmp / "p1.txt", src_format="md", dst_format="txt"),
+        Job(src=ep, dst=tmp / "p2.md", src_format="epub", dst_format="md"),
+    ]
+    for j in jobs:
+        j.dst.unlink(missing_ok=True)
+    results = run(jobs, progress=lambda i, t, f, l: events.append((i, t, f, l)))
+
+    check("两个任务都成功", [x.status for x in results] == ["ok", "ok"],
+          str([x.status for x in results]))
+    check("有进度回调", len(events) >= 6, str(len(events)))
+    check("任务序号正确", {e[0] for e in events} == {0, 1}, str({e[0] for e in events}))
+    check("总数正确", all(e[1] == 2 for e in events))
+    check("比例在 0~1 之间", all(0.0 <= e[2] <= 1.0 for e in events),
+          str([e[2] for e in events]))
+    check("每个任务都落到 1.0", any(e[0] == 0 and e[2] == 1.0 for e in events)
+          and any(e[0] == 1 and e[2] == 1.0 for e in events))
+
+    # 单文件内进度：EPUB 按章上报，至少出现 0 与 1 之间的中间值
+    inner = [e for e in events if e[0] == 1]
+    check("文件内有中间进度", any(0.0 < e[2] < 1.0 for e in inner), str(inner))
+
+    # 不传 progress 时不能因为缺回调而出错
+    ok = convert_one(Job(src=src, dst=tmp / "np.txt", src_format="md",
+                         dst_format="txt"), force=True)
+    check("无回调也能转换", ok.status == "ok", ok.reason)
+
+
 def main() -> int:
     print("=" * 66)
     print("AI eye 转换内核测试")
@@ -768,6 +1009,9 @@ def main() -> int:
         test_ocr(tmp)
         test_layout(tmp)
         test_image_input(tmp)
+        test_epub(tmp)
+        test_aieye(tmp)
+        test_progress(tmp)
         test_verify(tmp)
         test_cli_output(tmp)
     finally:

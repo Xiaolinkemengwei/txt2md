@@ -53,39 +53,34 @@ def step_exe(onedir: bool):
          str(ROOT / "aieye.spec")], env=env)
 
 
-def _sweep_tmp():
-    """清掉 dist/.tmp-* 残留。
-
-    setuptools 的 sdist 会在 dist/ 下建临时目录再搬成品，进程被中断时
-    临时目录会留下；下次构建若撞上同名残留会直接失败。
-    """
-    if not DIST.exists():
-        return
-    for d in DIST.glob(".tmp-*"):
-        shutil.rmtree(d, ignore_errors=True)
-
-
 def step_python_packages(failed: list):
     print("\n[3/5] 构建 Python 安装包（wheel + sdist）")
-    _sweep_tmp()
     try:
         run([sys.executable, "-m", "pip", "wheel", ".", "-w", str(DIST), "--no-deps"])
     except SystemExit as e:
         print(f"跳过 wheel：{e}")
         failed.append("wheel")
+    # sdist 不直接产到 dist/：setuptools 会先建一个 .tmp-xxxx 临时目录再把
+    # 成品改名搬出（原子写）。那个目录里有整套源码几十个文件，构建被中断、
+    # 或被删除保护拦下时会整包留在 dist/ 里——下次构建撞名直接失败，
+    # 之前就踩过一次。改产到 build/ 下的固定工作目录，只把单个 .tar.gz 搬进 dist/。
+    work = BUILD / "sdist-work"
+    work.mkdir(parents=True, exist_ok=True)
     try:
         # 不用 `python -m build`：那要额外装 build 包。setuptools 自带 PEP 517
         # 后端接口，直接调即可，少一个构建期依赖。
         from setuptools import build_meta
-        made = build_meta.build_sdist(str(DIST))
-        print(f"  {made}")
+        made = Path(build_meta.build_sdist(str(work)))
+        target = DIST / made.name
+        if target.exists():
+            target.unlink()
+        shutil.move(str(made), str(target))
+        print(f"  {target}")
     except Exception as e:
         # 这里不能只 print 后当作无事发生：退出码仍是 0，发布时容易漏掉
         # 一个产物还察觉不到。记入 failed，由 main 汇总成非零退出码。
         print(f"  !! sdist 构建失败：{e}")
         failed.append(f"sdist（{e}）")
-    finally:
-        _sweep_tmp()
 
 
 def step_zip(onedir: bool):

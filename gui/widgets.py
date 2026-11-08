@@ -40,6 +40,9 @@ GLYPH = {
     "chevron": "\ue76c",
     "sparkle": "\ue9d9",
     "warning": "\ue7ba",
+    "sun": "\ue706",      # Brightness
+    "moon": "\ue708",     # QuietHours
+    "guide": "\ue8a9",    # ViewAll：AI eye 导读
 }
 
 
@@ -293,7 +296,7 @@ class FluentSwitch(QWidget):
 
         on = self.isEnabled()
         if not on:
-            fill = QColor("#F3F3F3")
+            fill = QColor(T.SURFACE_ALT)
             p.setPen(QPen(QColor(T.STROKE), 1))
         elif self._checked:
             fill = QColor(T.ACCENT_HOVER if self._hover else T.ACCENT)

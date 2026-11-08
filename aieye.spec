@@ -67,6 +67,8 @@ HIDDEN = [
     "core", "core.model", "core.mdparse", "core.htmlio", "core.readers",
     "core.writers", "core.registry", "core.pipeline", "core.legacy",
     "core.errors", "core.pandoc_fallback", "core.ocr", "core.layout",
+    # EPUB 与 AI 导读走的是函数内延迟导入，静态分析跟不到，必须显式声明
+    "core.epub", "core.aieye_doc",
     # 格式编解码
     "openpyxl", "openpyxl.styles", "openpyxl.utils",
     "docx", "pdfplumber", "charset_normalizer",

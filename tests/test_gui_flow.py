@@ -77,7 +77,8 @@ def test_scan(app: QApplication, win: MainWindow, src: Path):
 def test_chips(win: MainWindow):
     print("\n2. 格式选择")
     chips: FormatGrid = win.chips
-    check("7 个格式卡片", len(chips._cards) == 7, str(len(chips._cards)))
+    check("8 个格式卡片", len(chips._cards) == 8, str(len(chips._cards)))
+    check("含 EPUB 卡片", "epub" in chips._cards)
     check("默认选中 md", chips.current_format() == "md", chips.current_format())
 
     chips.set_format("pdf")
@@ -319,6 +320,120 @@ def test_image_source(app: QApplication, win: MainWindow, tmp: Path):
     check("OCR 开关处于可用状态", win.sw_ocr.isChecked() and win.sw_ocr.isEnabled())
 
 
+def test_theme(app: QApplication, win: MainWindow):
+    print("\n10. 白天/黑夜主题")
+    from gui import theme as T
+
+    was = T.current_palette()
+    T.apply_to_app(app, "light")
+    light_bg, light_text = T.BG, T.TEXT
+    check("亮色背景是浅色", light_bg.upper().startswith("#F"), light_bg)
+    check("亮色文字是深色", light_text.upper().startswith("#1"), light_text)
+    check("亮色按钮提示切到黑夜", "黑夜" in win.btn_theme.toolTip(),
+          win.btn_theme.toolTip())
+
+    win._toggle_theme()
+    app.processEvents()
+    check("切换到黑夜", T.current_palette() == "dark", T.current_palette())
+    check("深色背景是深色", T.BG.upper() in ("#202020", "#1F1F1F"), T.BG)
+    check("深色文字是浅色", T.TEXT.upper() == "#FFFFFF", T.TEXT)
+    check("深色下按钮提示切回白天", "白天" in win.btn_theme.toolTip(),
+          win.btn_theme.toolTip())
+
+    # 样式表必须真的重新生成过：仍含浅色底就说明只改了变量没刷 QSS
+    sheet = app.styleSheet()
+    check("QSS 已刷新为深色", "#202020" in sheet and "#F3F3F3" not in sheet)
+    check("深色下强调色独立", T.ACCENT.upper() != "#0F6CBD", T.ACCENT)
+
+    # 关键控件在深色下仍是可读的组合（不是白底白字）
+    check("深色卡片与文字不同色", T.CARD != T.TEXT, f"{T.CARD}/{T.TEXT}")
+    check("深色禁用文字仍可辨", T.TEXT_DISABLED != T.CARD, T.TEXT_DISABLED)
+
+    win._toggle_theme()
+    app.processEvents()
+    check("能切回白天", T.current_palette() == "light", T.current_palette())
+    T.apply_to_app(app, was)
+
+
+def test_progress(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n11. 转换进度显示")
+    src = tmp / "进度源.md"
+    src.write_text("# 章一\n\n内容。\n\n# 章二\n\n内容。\n", encoding="utf-8")
+    win._set_paths([src])
+    win.chips.set_format("epub")
+    app.processEvents()
+
+    target = src.with_suffix(".epub")
+    target.unlink(missing_ok=True)
+    values: list[int] = []
+    win.progress.valueChanged.connect(lambda v: values.append(v))
+    run_convert(app, win)
+
+    check("进度条使用千分制", win.progress.maximum() == 1000, str(win.progress.maximum()))
+    check("进度条有推进", len(values) >= 2, str(values))
+    check("进度值在范围内", all(0 <= v <= 1000 for v in values), str(values[:5]))
+    check("最终到达满格", 1000 in values or win.progress.value() == 1000,
+          f"max={max(values) if values else None} cur={win.progress.value()}")
+    check("产物已生成", target.exists())
+
+
+def test_aieye_switch(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n12. AI eye 导读开关")
+    check("开关存在", win.sw_aieye is not None)
+    check("默认关闭", not win.sw_aieye.isChecked())
+
+    src = tmp / "导读.md"
+    src.write_text("# 章\n\n正文内容足够长一些，方便生成摘要。\n", encoding="utf-8")
+    win._set_paths([src])
+    win.chips.set_format("txt")
+    win.sw_aieye.setChecked(True, animate=False)
+    app.processEvents()
+
+    out = src.with_suffix(".txt")
+    guide = src.with_name(f"{src.stem}.aieye.md")
+    out.unlink(missing_ok=True)
+    guide.unlink(missing_ok=True)
+    run_convert(app, win)
+
+    check("产物生成", out.exists())
+    check("导读生成", guide.exists(), str(guide))
+    if guide.exists():
+        text = guide.read_text("utf-8")
+        check("导读含 front-matter", text.startswith("---\naieye: 1"), text[:30])
+        check("导读含结构地图", "结构地图" in text)
+    win.sw_aieye.setChecked(False, animate=False)
+
+
+def test_epub_source(app: QApplication, win: MainWindow, tmp: Path):
+    print("\n13. EPUB 作为输入")
+    from core.pipeline import Job, convert_one
+
+    md = tmp / "电子书源.md"
+    md.write_text("# 第一章\n\n正文一。\n\n# 第二章\n\n正文二。\n", encoding="utf-8")
+    epub = tmp / "电子书.epub"
+    epub.unlink(missing_ok=True)
+    r = convert_one(Job(md, epub, "md", "epub"), force=True)
+    check("能造出测试用 EPUB", r.status == "ok", r.reason)
+
+    win._set_paths([epub])
+    app.processEvents()
+    check("EPUB 被扫描为可转换文件",
+          any(f.name == "电子书.epub" for f in win.found_files),
+          str([f.name for f in win.found_files]))
+    check("EPUB 出现在卡片中", "epub" in win.chips._cards)
+
+    win.chips.set_format("md")
+    win.sw_aieye.setChecked(False, animate=False)
+    app.processEvents()
+    out = epub.with_suffix(".md")
+    out.unlink(missing_ok=True)
+    run_convert(app, win)
+    check("EPUB → md 成功", out.exists())
+    if out.exists():
+        body = out.read_text("utf-8")
+        check("两章内容都在", "第一章" in body and "第二章" in body, body[:80])
+
+
 def main() -> int:
     print("=" * 62)
     print("AI eye 界面层测试")
@@ -345,6 +460,10 @@ def main() -> int:
         test_layout_heights(win)
         test_viewer(app, win, tmp)
         test_image_source(app, win, tmp)
+        test_theme(app, win)
+        test_progress(app, win, tmp)
+        test_aieye_switch(app, win, tmp)
+        test_epub_source(app, win, tmp)
     finally:
         win.close()
         shutil.rmtree(tmp, ignore_errors=True)

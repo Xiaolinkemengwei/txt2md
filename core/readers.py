@@ -193,6 +193,19 @@ def read_html_file(path: Path, *, encoding: str = "") -> Document:
     return doc
 
 
+def read_epub_file(path: Path, *, images: bool = True,
+                   assets_dir: str | Path | None = None,
+                   progress=None) -> Document:
+    """EPUB → 块模型。
+
+    真正的解析在 :mod:`core.epub`；这里只做薄包装，让 READERS 表保持
+    「一个格式一个函数」的形状。延迟导入避免 epub ↔ readers 循环引用
+    （epub 解码时要复用这里的 decode_bytes）。
+    """
+    from .epub import read_epub
+    return read_epub(path, images=images, assets_dir=assets_dir, progress=progress)
+
+
 def read_csv_file(path: Path, *, encoding: str = "", delimiter: str = "",
                   has_header: bool = True) -> Document:
     """读取 CSV/TSV 为工作表。
@@ -890,7 +903,7 @@ def _blocks_with_figures(lines: list[dict], regions: list, image,
 
 def read_pdf_file(path: Path, *, max_pages: int = 0, ocr: bool = False,
                   images: bool = True, assets_dir: str | Path | None = None,
-                  layout: bool = True) -> Document:
+                  layout: bool = True, progress=None) -> Document:
     try:
         import pdfplumber
     except ImportError as exc:
@@ -965,6 +978,13 @@ def read_pdf_file(path: Path, *, max_pages: int = 0, ocr: bool = False,
             if not pages:
                 raise SourceError(f"{path.name} 没有页面")
             for idx, page in enumerate(pages, 1):
+                # 进度在**每页开头**上报：OCR 一页要 3~6 秒，等这一页跑完
+                # 再报会让进度条长期停在 0，看上去像卡死。
+                if progress:
+                    try:
+                        progress(idx - 1, len(pages), f"第 {idx}/{len(pages)} 页")
+                    except Exception:
+                        pass
                 text = page.extract_text() or ""
                 tables = _pdf_real_tables(page)
                 if not text.strip() and not tables:
@@ -1009,7 +1029,6 @@ def read_pdf_file(path: Path, *, max_pages: int = 0, ocr: bool = False,
         raise
     except Exception as exc:
         raise SourceError(f"无法读取 {path.name}：{exc}") from exc
-
     # 少量无文字页（插图、扉页）不算失败，合并成一条提示，不逐页刷屏
     if figure_count:
         doc.warnings.append(
@@ -1145,6 +1164,7 @@ READERS = {
     "txt": read_text_file,
     "md": read_markdown_file,
     "html": read_html_file,
+    "epub": read_epub_file,
     "csv": read_csv_file,
     "xlsx": read_xlsx_file,
     "docx": read_docx_file,

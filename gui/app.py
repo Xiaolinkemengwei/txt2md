@@ -29,18 +29,19 @@ from core.registry import (ALL_EXTENSIONS, FORMATS, capability,  # noqa: E402
 
 from . import theme as T
 from .theme import repolish
-from .widgets import (AppRoot, Card, DropOverlay, EmptyState, FluentSwitch,
-                      FormatGrid, HoverRow, IconButton, IconTile, LogRow,
-                      SectionHeader, make_button, paint_eye)
+from .widgets import (GLYPH, AppRoot, Card, DropOverlay, EmptyState,
+                      FluentSwitch, FormatGrid, HoverRow, IconButton, IconTile,
+                      LogRow, SectionHeader, icon_font, make_button, paint_eye)
 
 APP_NAME = "AI eye"
 APP_TAGLINE = "文档格式转换"
 SHORTCUT_HINT = "Ctrl+Enter 转换"
 # 版本号的唯一来源是 aieye.py 的 __version__；这里只是兜底（单独跑本文件时用）。
-APP_VERSION = "2.2.0"
+APP_VERSION = "2.3.0"
 
-# 设置行的图标：智能排版=字体大小、OCR=眼睛、覆盖=文档
-_OPTION_GLYPH = {"smart": "\ue8e9", "eye": "\ue7b3", "doc": "\ue8a5"}
+# 设置行的图标：智能排版=字体大小、OCR=眼睛、覆盖=文档、导读=目录
+_OPTION_GLYPH = {"smart": "\ue8e9", "eye": "\ue7b3", "doc": "\ue8a5",
+                 "guide": "\ue8a9"}
 
 
 # ---------------------------------------------------------------- 转换线程
@@ -56,6 +57,9 @@ class ConvertWorker(QThread):
 
     item_ready = Signal(str, str, str, str, str)   # status, src, dst, reason, preview
     finished_all = Signal(int, int, int, int)   # ok, skipped, error, total
+    # 文件内进度：任务序号、任务总数、千分比、阶段文字。
+    # 用千分比而不是百分比：单页 OCR 要几秒，百分比粒度太粗，进度条会一格一格跳。
+    progress_changed = Signal(int, int, int, str)
 
     def __init__(self, jobs: list, force: bool, parent=None):
         super().__init__(parent)
@@ -65,9 +69,15 @@ class ConvertWorker(QThread):
     def run(self):
         ok = skipped = error = 0
         try:
-            for job in self.jobs:
+            total = len(self.jobs)
+            for i, job in enumerate(self.jobs):
+
+                def _fp(frac: float, label: str = "", _i=i) -> None:
+                    self.progress_changed.emit(
+                        _i, total, max(0, min(1000, int(frac * 1000))), label)
+
                 try:
-                    result = convert_one(job, force=self.force)
+                    result = convert_one(job, force=self.force, progress=_fp)
                 except BaseException as exc:                      # 单任务兜底
                     result = Result(status="error", src=str(job.src),
                                     dst=str(job.dst),
@@ -180,10 +190,32 @@ class MainWindow(QMainWindow):
         col.addWidget(sub)
         row.addLayout(col, 1)
 
+        self.btn_theme = IconButton(
+            "moon" if not T.is_dark() else "sun",
+            "切换到黑夜模式" if not T.is_dark() else "切换到白天模式")
+        self.btn_theme.clicked.connect(self._toggle_theme)
+        row.addWidget(self.btn_theme, 0, Qt.AlignVCenter)
+
         self.btn_about = IconButton("info", "关于 AI eye")
         self.btn_about.clicked.connect(self._show_about)
         row.addWidget(self.btn_about, 0, Qt.AlignVCenter)
         return bar
+
+    def _toggle_theme(self):
+        """切换白天/黑夜，立刻重刷全局样式并记住选择。"""
+        name = T.toggle()
+        T.apply_to_app(QApplication.instance())
+        self._settings.setValue("theme", name)
+        self._sync_theme_button()
+        # 自绘控件（开关轨道、悬停行、图标块）不认 QSS，必须自己重绘一次
+        for w in self.findChildren(QWidget):
+            w.update()
+
+    def _sync_theme_button(self):
+        dark = T.is_dark()
+        self.btn_theme.setText(GLYPH["sun"] if dark else GLYPH["moon"])
+        self.btn_theme.setFont(icon_font(15))
+        self.btn_theme.setToolTip("切换到白天模式" if dark else "切换到黑夜模式")
 
     def _show_about(self):
         from core.registry import detect_engines
@@ -280,6 +312,14 @@ class MainWindow(QMainWindow):
             "doc", "覆盖同名文件", "关闭时目标已存在则自动跳过，不会覆盖已有内容",
             self.sw_overwrite))
 
+        lay.addWidget(self._divider())
+
+        self.sw_aieye = FluentSwitch(checked=False)
+        lay.addWidget(self._option_row(
+            "guide", "生成 AI eye 导读",
+            "在产物旁多写一份 .aieye.md 文档地图，帮 AI 快速理解结构与定位内容",
+            self.sw_aieye))
+
         self._on_format_changed(self.chips.current_format())
         return card
 
@@ -311,7 +351,8 @@ class MainWindow(QMainWindow):
 
         icon = QLabel()
         icon.setFont(QFont(T.ICON_FAMILY))
-        icon.setStyleSheet(f"color: {T.TEXT_SECOND}; background: transparent;")
+        # 颜色交给 QSS：写成内联样式的话，切换主题后这一行仍是旧主题的灰
+        icon.setObjectName("rowIcon")
         icon.setText(_OPTION_GLYPH.get(glyph, _OPTION_GLYPH["doc"]))
         icon.setFixedWidth(18)
         icon.setAlignment(Qt.AlignCenter)
@@ -458,7 +499,8 @@ class MainWindow(QMainWindow):
             self.chips.set_format(fmt)
             self._on_format_changed(fmt)
         for key, switch in (("smart", self.sw_smart), ("ocr", self.sw_ocr),
-                            ("overwrite", self.sw_overwrite)):
+                            ("overwrite", self.sw_overwrite),
+                            ("aieye", self.sw_aieye)):
             val = self._settings.value(key, None)
             if val is not None:
                 switch.setChecked(str(val).lower() in ("true", "1"), animate=False)
@@ -470,6 +512,8 @@ class MainWindow(QMainWindow):
         self._settings.setValue("smart", self.sw_smart.isChecked())
         self._settings.setValue("ocr", self.sw_ocr.isChecked())
         self._settings.setValue("overwrite", self.sw_overwrite.isChecked())
+        self._settings.setValue("aieye", self.sw_aieye.isChecked())
+        self._settings.setValue("theme", T.current_palette())
 
     def closeEvent(self, e):
         # 线程还在跑时直接关窗，QThread 会在运行中被析构，轻则警告重则崩溃。
@@ -730,7 +774,8 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------- 状态切换
     def _set_busy(self, busy: bool):
         for w in (self.btn_files, self.btn_folder, self.btn_convert, self.path_edit,
-                  self.chips, self.sw_smart, self.sw_ocr, self.sw_overwrite):
+                  self.chips, self.sw_smart, self.sw_ocr, self.sw_overwrite,
+                  self.sw_aieye):
             w.setEnabled(not busy)
         self.btn_convert.setText("转换中…" if busy else "一键转换")
         self.btn_clear.setEnabled(not busy)
@@ -758,6 +803,7 @@ class MainWindow(QMainWindow):
         smart = self.sw_smart.isChecked()
         force = self.sw_overwrite.isChecked()
         use_ocr = self.sw_ocr.isChecked()
+        want_guide = self.sw_aieye.isChecked()
 
         # 图片没有文字层，OCR 是唯一途径，不是可选增强：勾没勾都要开
         has_image = any((f.suffix.lower() in FORMATS["image"].extensions)
@@ -770,6 +816,7 @@ class MainWindow(QMainWindow):
         for job in jobs:
             job.options["smart"] = smart
             job.options["ocr"] = use_ocr
+            job.options["aieye"] = want_guide
             if job.src_format == "image":
                 job.options["ocr"] = True
             if not smart:
@@ -787,7 +834,7 @@ class MainWindow(QMainWindow):
         self.log.clear()
         self._show_empty(False)
         self.progress.setVisible(True)
-        self.progress.setRange(0, len(jobs))
+        self.progress.setRange(0, 1000)      # 千分比：文件内进度要细粒度
         self.progress.setValue(0)
         self.progress_text.setText(f"0 / {len(jobs)}" if jobs else "")
         self._set_summary(f"共 {len(jobs)} 个文件 → {dst_code}")
@@ -817,8 +864,19 @@ class MainWindow(QMainWindow):
         self._set_busy(True)
         self.worker = ConvertWorker(ready, force)
         self.worker.item_ready.connect(self._on_item)
+        self.worker.progress_changed.connect(self._on_progress)
         self.worker.finished_all.connect(self._on_finished)
         self.worker.start()
+
+    def _on_progress(self, index: int, total: int, permille: int, label: str):
+        """把「第 i 个文件的 x%」换算成整批进度。"""
+        if total <= 0:
+            return
+        overall = (index + permille / 1000.0) / total
+        self.progress.setValue(max(0, min(1000, int(overall * 1000))))
+        pct = int(overall * 100)
+        tail = f" · {label}" if label else ""
+        self.progress_text.setText(f"{index + 1} / {total}　{pct}%{tail}")
 
     def _on_item(self, kind: str, src: str, dst: str, reason: str,
                  preview: str = "", advance: bool = True):
@@ -834,12 +892,8 @@ class MainWindow(QMainWindow):
         self.log.addItem(item)
         self.log.setItemWidget(item, row)
         self.log.scrollToBottom()
-        if not advance:
-            return                    # 提示行不是任务，不动进度条
-        value = min(self.progress.value() + 1, self.progress.maximum())
-        self.progress.setValue(value)
-        if self.progress.maximum():
-            self.progress_text.setText(f"{value} / {self.progress.maximum()}")
+        # 进度条由 progress_changed 驱动（含文件内百分比），这里不再推进——
+        # 否则一个任务完成会跳两格，和「70% 是怎么来的」对不上。
 
     def _on_finished(self, ok: int, skipped: int, error: int, total: int):
         self._set_busy(False)
@@ -933,7 +987,9 @@ def run() -> int:
     app.setOrganizationName("AIeye")
     T.init_fonts()  # 字体探测需在 QApplication 之后
     app.setFont(QFont(T.UI_FAMILY, 9))
-    app.setStyleSheet(T.qss())
+    # 主题要在建窗口之前落地：先建窗口再换肤会有一帧白底闪烁
+    saved_theme = QSettings("AIeye", "AIeye").value("theme", "light")
+    T.apply_to_app(app, str(saved_theme))
     app.setWindowIcon(app_icon())
 
     win = MainWindow()

@@ -617,5 +617,11 @@ def write_any(doc: Document, path: Path, dst_format: str, **opts) -> str:
         return "python-docx"
     if fmt == "pdf":
         return write_pdf(doc, path, title=doc.name, images=images)
+    if fmt == "epub":
+        from .epub import write_epub
+        return write_epub(doc, path, images=images,
+                          title=opts.pop("epub_title", ""),
+                          author=opts.pop("epub_author", ""),
+                          language=opts.pop("epub_language", ""))
 
     raise SourceError(f"暂不支持写出 {fmt}")

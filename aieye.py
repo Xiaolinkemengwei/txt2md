@@ -24,7 +24,7 @@ import unicodedata
 from pathlib import Path
 
 APP_NAME = "AI eye"
-__version__ = "2.2.0"
+__version__ = "2.3.0"
 __all__ = ["convert_file", "collect_txt_files", "run_convert", "read_text_smart",
            "to_markdown", "__version__"]
 
@@ -294,6 +294,8 @@ def main():
                         help="不导出插图（只留文字，Markdown 里不留图片引用）")
     parser.add_argument("--assets-dir", default="", metavar="目录",
                         help="插图存放目录（默认 <输出名>_assets）")
+    parser.add_argument("--aieye", action="store_true",
+                        help="在产物旁生成 AI eye 导读（.aieye.md 文档地图，供大模型快速理解）")
     parser.add_argument("--dry-run", action="store_true",
                         help="只做预检并列出计划，不实际转换")
     parser.add_argument("--formats", action="store_true", help="显示格式转换矩阵后退出")
@@ -353,6 +355,7 @@ def main():
         "ocr": args.ocr,
         "layout": not args.no_layout,
         "images": not args.no_images,
+        "aieye": args.aieye,
     }
     if args.assets_dir:
         opts["assets_dir"] = args.assets_dir
@@ -377,7 +380,23 @@ def main():
         print(f"\n未做任何转换（--dry-run）。去掉该参数即可执行。")
         sys.exit(1 if blocked else 0)
 
-    results = run(jobs, force=args.force, verify=not args.no_verify, prechecked=True)
+    # 进度只在交互终端里画：重定向到文件时千分比行会把日志刷成一片
+    _show_progress = (not args.quiet) and sys.stderr.isatty()
+
+    def _progress(index: int, total: int, frac: float, label: str) -> None:
+        if not _show_progress or total <= 0:
+            return
+        overall = (index + frac) / total
+        # \r 覆盖同一行；label 截断到固定宽度，避免长短不一留下残字
+        sys.stderr.write(f"\r  {index + 1}/{total}  {int(overall * 100):>3}%  "
+                         f"{label[:30]:<30}")
+        sys.stderr.flush()
+
+    results = run(jobs, force=args.force, verify=not args.no_verify,
+                  prechecked=True, progress=_progress)
+    if _show_progress:
+        sys.stderr.write("\r" + " " * 60 + "\r")   # 抹掉进度行
+        sys.stderr.flush()
     stats = summarize(results)
 
     if not args.quiet:
@@ -385,6 +404,8 @@ def main():
             if r.status == "ok":
                 print(f"✓ {r.src}")
                 print(f"    -> {r.dst}  [{r.engine}]")
+                if r.guide:
+                    print(f"    导读 -> {r.guide}")
                 for w in r.warnings:
                     print(f"    ! {w}")
             elif r.status == "skipped":

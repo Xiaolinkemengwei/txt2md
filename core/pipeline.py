@@ -64,6 +64,9 @@ class Result:
     # 任何目标格式都能预览——docx/pdf 的产物本身没法直接读成文本。
     preview: str = ""
 
+    # 本次任务顺带生成的 AI eye 导读路径（未开启时为空）
+    guide: str = ""
+
     @property
     def ok(self) -> bool:
         return self.status == "ok"
@@ -236,11 +239,15 @@ def precheck(jobs: list[Job], *, force: bool = False) -> tuple[list[Job], list[J
 PREVIEW_LIMIT = 2_000_000
 
 
-def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result:
+def convert_one(job: Job, *, force: bool = False, verify: bool = True,
+                progress=None) -> Result:
     """执行单个转换任务。所有异常都转成 Result，不向上抛。
 
     插图会先落在私有临时目录（几百张图不适合常驻内存），任务结束无论成败
     都清掉——md/html 需要的图在这一步已经被复制到目标目录了。
+
+    ``progress(fraction, label)``：当前**文件内**的进度，fraction 为 0~1。
+    读取器按页/按章上报（PDF 逐页、EPUB 逐章），其它格式只在首尾各报一次。
     """
     import shutil
     start = time.perf_counter()
@@ -248,13 +255,52 @@ def convert_one(job: Job, *, force: bool = False, verify: bool = True) -> Result
     asset_root = Path(tempfile.mkdtemp(prefix="aieye-assets-"))
     try:
         return _convert_one_inner(job, force=force, verify=verify, opts=opts,
-                                  asset_root=asset_root, start=start)
+                                  asset_root=asset_root, start=start,
+                                  progress=progress)
     finally:
         shutil.rmtree(asset_root, ignore_errors=True)
 
 
+def _wrap_reader_progress(progress):
+    """把读取器的 ``(done, total, label)`` 适配成对外的 ``(fraction, label)``。
+
+    读取器不必知道批次里还有多少个文件，只报自己这一份的进度；批次总进度
+    由调用方（界面/命令行）用「已完成文件数 + 当前比例」算，两边职责不混。
+    """
+    if progress is None:
+        return None
+
+    def cb(done: int, total: int, label: str = "") -> None:
+        frac = (done / total) if total > 0 else 0.0
+        progress(max(0.0, min(1.0, frac)), label)
+    return cb
+
+
+def _progress_span(progress, lo: float, hi: float):
+    """把一个 0~1 的进度映射到 [lo, hi] 区间。
+
+    读取占总进度的大头（PDF 的 OCR 每页几秒，写出几乎瞬时），所以读取段
+    分到 0~0.72，写出与校验分剩下的部分。
+    """
+    if progress is None:
+        return None
+
+    def f(frac: float, label: str = "") -> None:
+        progress(lo + (hi - lo) * max(0.0, min(1.0, frac)), label)
+    return f
+
+
+def _progress_kw(cb) -> dict:
+    """只在有回调时把 progress 塞进读取器参数。
+
+    read_any 会按读取器签名过滤参数，但直接传 ``progress=None`` 会让
+    「有没有进度」这件事变得不可判——读取器内部就不必再判空。
+    """
+    return {"progress": cb} if cb is not None else {}
+
+
 def _convert_one_inner(job: Job, *, force: bool, verify: bool, opts: dict,
-                       asset_root: Path, start: float) -> Result:
+                       asset_root: Path, start: float, progress=None) -> Result:
     try:
         # 预检必须在 try 内：check() 里要碰文件系统（stat / exists / 目录可写性
         # 探测），网络盘掉线、路径含非法字符、权限被回收都会在这里抛 OSError。
@@ -265,6 +311,9 @@ def _convert_one_inner(job: Job, *, force: bool, verify: bool, opts: dict,
             status = "skipped" if reason.startswith("目标文件已存在") else "error"
             return Result(status=status, src=str(job.src), dst=str(job.dst), reason=reason)
 
+        if progress:
+            progress(0.0, "准备中")
+
         # ---- 同格式：只复制，不重组 ----------------------------
         # 用户选错目标格式时，最坏的结果不该是「内容被重新排版了一遍」。
         # 逐字节复制能保证这种情况下数据零损失。
@@ -274,6 +323,8 @@ def _convert_one_inner(job: Job, *, force: bool, verify: bool, opts: dict,
             shutil.copyfile(job.src, job.dst)
             if verify:
                 verify_output(job.dst, job.dst_format)
+            if progress:
+                progress(1.0, "完成")
             return Result(status="ok", src=str(job.src), dst=str(job.dst),
                           engine="直接复制", seconds=time.perf_counter() - start)
 
@@ -300,25 +351,51 @@ def _convert_one_inner(job: Job, *, force: bool, verify: bool, opts: dict,
             if verify:
                 verify_output(job.dst, "md")
             warnings = [job.options["_encoding_warning"]] if "_encoding_warning" in job.options else []
+            if progress:
+                progress(1.0, "完成")
             return Result(status="ok", src=str(job.src), dst=str(job.dst),
                           engine="内置", warnings=warnings,
                           preview=md[:PREVIEW_LIMIT],
                           seconds=time.perf_counter() - start)
 
         doc = read_any(job.src, job.src_format,
-                       **_reader_opts(opts, asset_root))
+                       **_reader_opts(opts, asset_root),
+                       **_progress_kw(_wrap_reader_progress(
+                           _progress_span(progress, 0.0, 0.72))))
         if doc.is_empty():
             raise SourceError("源文件没有可转换的内容")
 
+        if progress:
+            progress(0.74, "写出中")
         engine = write_any(doc, job.dst, job.dst_format, **_writer_opts(opts))
+        if progress:
+            progress(0.96, "校验中")
 
         warnings = list(doc.warnings)
         if verify:
             warnings.extend(verify_output(job.dst, job.dst_format, doc))
+        if progress:
+            progress(1.0, "完成")
+
+        # ---- AI eye 导读（可选）----------------------------------
+        # 放在产物校验之后：产物写失败时不该留下一份「指向不存在文件」的导读。
+        guide = ""
+        if opts.get("aieye"):
+            try:
+                from .aieye_doc import app_version, write_guide
+                gp = write_guide(doc, job.dst,
+                                 source_name=job.src.name,
+                                 target_format=job.dst_format,
+                                 app_version=app_version(),
+                                 images_prefix=_guide_images_prefix(job, opts))
+                guide = str(gp)
+            except Exception as exc:
+                # 导读是附加物，失败不能把已经成功的转换判为失败
+                warnings.append(f"AI eye 导读未生成：{type(exc).__name__}: {exc}")
 
         return Result(status="ok", src=str(job.src), dst=str(job.dst),
                       engine=engine, warnings=warnings,
-                      preview=_preview_of(doc),
+                      preview=_preview_of(doc), guide=guide,
                       seconds=time.perf_counter() - start)
 
     except ConvertError as exc:
@@ -378,6 +455,25 @@ def _reader_opts(opts: dict, assets_dir: Path | None = None) -> dict:
 def _writer_opts(opts: dict) -> dict:
     keys = {"delimiter", "numeric", "images"}
     return {k: v for k, v in opts.items() if k in keys}
+
+
+def _guide_images_prefix(job: Job, opts: dict) -> str:
+    """导读里引用插图的前缀，必须与写出器实际使用的目录一致。
+
+    md/html 把图落成独立文件，导读里的路径要能点开；docx/pdf/epub 把图内嵌，
+    导读里给文件名即可（方便人看图注与序号对应）。
+    """
+    if job.dst_format not in ("md", "html") or not opts.get("images", True):
+        return ""
+    custom = opts.get("assets_dir")
+    if custom:
+        try:
+            import os as _os
+            rel = _os.path.relpath(str(custom), str(job.dst.parent))
+            return rel.replace("\\", "/")
+        except ValueError:              # 跨盘符没法算相对路径
+            return ""
+    return f"{job.dst.stem}_assets"
 
 
 def _preview_of(doc) -> str:
@@ -447,17 +543,32 @@ def verify_output(path: Path, fmt: str, doc=None) -> list[str]:
 
 # ---------------------------------------------------------------- 批量
 def run(jobs: list[Job], *, force: bool = False, verify: bool = True,
-        prechecked: bool = False) -> list[Result]:
-    """按顺序执行任务。返回与 jobs 等长的结果列表。"""
+        prechecked: bool = False, progress=None) -> list[Result]:
+    """按顺序执行任务。返回与 jobs 等长的结果列表。
+
+    ``progress(index, total, fraction, label)``：index 从 0 起，fraction 是
+    **当前文件**的比例。界面据此画一条通栏进度条并显示「第几个 / 共几个」。
+    """
     results: list[Result] = []
-    for job in jobs:
+    total = len(jobs)
+    for i, job in enumerate(jobs):
         blocked = job.options.get("_blocked_by") if prechecked else None
         if blocked:
             status = "skipped" if blocked.startswith("目标文件已存在") else "error"
             results.append(Result(status=status, src=str(job.src),
                                   dst=str(job.dst), reason=blocked))
+            if progress:
+                progress(i + 1, total, 1.0, "已跳过")
             continue
-        results.append(convert_one(job, force=force, verify=verify))
+
+        if progress:
+            progress(i, total, 0.0, job.src.name)
+
+        def _fp(frac: float, label: str = "", _i=i) -> None:
+            if progress:
+                progress(_i, total, frac, label)
+
+        results.append(convert_one(job, force=force, verify=verify, progress=_fp))
     return results
 
 

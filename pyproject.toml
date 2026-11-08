@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aieye"
-version = "2.2.0"
+version = "2.3.0"
 description = "AI eye：一眼看懂、一键转好的文档格式互转工具。txt / md / html / csv / xlsx / docx / pdf 双向转换，支持中文编码自动识别、扫描件 OCR 与 Fluent Design 桌面界面"
 readme = "README.md"
 requires-python = ">=3.9"
