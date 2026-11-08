@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -60,22 +61,39 @@ def step_python_packages(failed: list):
     except SystemExit as e:
         print(f"跳过 wheel：{e}")
         failed.append("wheel")
-    # sdist 不直接产到 dist/：setuptools 会先建一个 .tmp-xxxx 临时目录再把
-    # 成品改名搬出（原子写）。那个目录里有整套源码几十个文件，构建被中断、
-    # 或被删除保护拦下时会整包留在 dist/ 里——下次构建撞名直接失败，
-    # 之前就踩过一次。改产到 build/ 下的固定工作目录，只把单个 .tar.gz 搬进 dist/。
+    # sdist 不走「期望它把文件放好」这条路。setuptools 的实际行为是：
+    # 在仓库根建 aieye-<ver>/ 暂存整套源码 → 打包 → 写进 <target>/.tmp-xxxx/
+    # → 改名搬出 → 删掉暂存目录。中间任何一步被中断，或删目录被系统/安全
+    # 策略拦下，成品就卡在 .tmp-xxxx 里、暂存目录留在根上，而调用方拿不到
+    # 返回值——之前连续两次「构建成功但 dist 里没有新 tar.gz」都是这个原因。
+    #
+    # 所以这里改成：把整个过程当成可能抛异常，抛了也照样去临时目录里找产物；
+    # 暂存目录只改名搬走，不删除。
     work = BUILD / "sdist-work"
     work.mkdir(parents=True, exist_ok=True)
     try:
         # 不用 `python -m build`：那要额外装 build 包。setuptools 自带 PEP 517
         # 后端接口，直接调即可，少一个构建期依赖。
         from setuptools import build_meta
-        made = Path(build_meta.build_sdist(str(work)))
-        target = DIST / made.name
+        try:
+            build_meta.build_sdist(str(work))
+        except BaseException as e:   # noqa: BLE001 —— 收尾失败也要继续找产物
+            print(f"  (setuptools 收尾异常，继续查找产物：{type(e).__name__})")
+
+        made = sorted(work.rglob(f"aieye-{VERSION}.tar.gz"),
+                      key=lambda p: p.stat().st_mtime)
+        if not made:
+            raise FileNotFoundError(f"{work} 下没有 aieye-{VERSION}.tar.gz")
+        target = DIST / made[-1].name
         if target.exists():
             target.unlink()
-        shutil.move(str(made), str(target))
+        shutil.move(str(made[-1]), str(target))
         print(f"  {target}")
+
+        # 暂存目录可能还在仓库根上，改名搬进 build/，不删（删整套源码会被拦）
+        leftover = ROOT / f"aieye-{VERSION}"
+        if leftover.is_dir():
+            shutil.move(str(leftover), str(BUILD / f"staging-{int(time.time())}"))
     except Exception as e:
         # 这里不能只 print 后当作无事发生：退出码仍是 0，发布时容易漏掉
         # 一个产物还察觉不到。记入 failed，由 main 汇总成非零退出码。
